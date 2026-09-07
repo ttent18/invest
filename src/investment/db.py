@@ -12,9 +12,10 @@ import psycopg
 from dotenv import load_dotenv
 from psycopg.rows import dict_row
 
-from investment.config import ScreenCriteria
+from investment.config import BUCKETS, ScreenCriteria
 from investment.fills import FillError
 from investment.market import Fundamentals
+from investment.sizing import required_win_rate
 
 MIGRATIONS_DIR = Path(__file__).resolve().parents[2] / "migrations"
 
@@ -297,3 +298,59 @@ def save_fill_result(
                 "UPDATE proposals SET outcome = 'taken' WHERE id = %s", (proposal_id,)
             )
     conn.commit()
+
+
+def select_bucket_performance(conn) -> list[dict]:
+    """枠ごとの成績を返す。「どちらの型が向いているか」を測るための表。
+
+    数えるのは売って決着した取引だけ。買っただけの分は勝ち負けが
+    決まっていないので含めない。
+
+    勝率だけでは判断できないので、損益トントンの勝率も一緒に返す。
+    それを上回っていて初めて「効いている」と言える。
+
+    まだ1件も決着していない枠も 0 件として返す。行が消えると
+    「まだ始まっていない」のか「集計から漏れた」のか分からなくなる。
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT bucket,
+                   COUNT(*)                                  AS closed,
+                   COUNT(*) FILTER (WHERE realized_pnl > 0)  AS wins,
+                   COALESCE(SUM(realized_pnl), 0)             AS total_pnl,
+                   AVG(holding_days)                          AS avg_holding_days
+            FROM trades
+            WHERE side = 'sell' AND bucket IS NOT NULL
+            GROUP BY bucket
+            """
+        )
+        by_name = {r["bucket"]: r for r in cur.fetchall()}
+
+    result = []
+    for b in BUCKETS:
+        row = by_name.get(b.name)
+        closed = int(row["closed"]) if row else 0
+        wins = int(row["wins"]) if row else 0
+        entry = 1000.0  # 率だけを求めるので、基準の値は何でもよい
+        result.append(
+            {
+                "bucket": b.name,
+                "closed": closed,
+                "wins": wins,
+                "win_rate": (wins / closed) if closed else None,
+                "total_pnl": float(row["total_pnl"]) if row else 0.0,
+                "avg_holding_days": (
+                    float(row["avg_holding_days"])
+                    if row and row["avg_holding_days"] is not None
+                    else None
+                ),
+                "breakeven_win_rate": required_win_rate(
+                    entry,
+                    entry * (1 + b.take_profit_pct),
+                    entry * (1 - b.stop_loss_pct),
+                    0.0,
+                ),
+            }
+        )
+    return result

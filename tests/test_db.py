@@ -11,6 +11,7 @@ from investment.db import (
     mark_fill_failed,
     record_gap,
     record_gaps,
+    select_bucket_performance,
     select_capital,
     select_screened,
     select_unapplied_fills,
@@ -341,3 +342,80 @@ def test_mark_fill_failed_keeps_the_row_and_records_the_reason(conn):
         row = cur.fetchone()
     assert row["applied_at"] is None                      # 未反映のまま
     assert "保有していません" in row["apply_error"]
+
+
+def _sell_trade(conn, bucket: str, pnl: float, days: int) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO trades
+                (executed_at, symbol, side, quantity, price, currency,
+                 bucket, realized_pnl, holding_days)
+            VALUES (NOW(), '1111.T', 'sell', 100, 1000, 'JPY', %s, %s, %s)
+            """,
+            (bucket, pnl, days),
+        )
+    conn.commit()
+
+
+def test_bucket_performance_counts_only_closed_trades(conn):
+    """成績は「売って決着した取引」だけで数える。買っただけの分は含めない。"""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO trades
+                (executed_at, symbol, side, quantity, price, currency, bucket)
+            VALUES (NOW(), '1111.T', 'buy', 100, 900, 'JPY', 'じっくり')
+            """
+        )
+    conn.commit()
+    _sell_trade(conn, "じっくり", pnl=20000, days=30)
+
+    rows = {r["bucket"]: r for r in select_bucket_performance(conn)}
+    assert rows["じっくり"]["closed"] == 1
+
+
+def test_bucket_performance_reports_the_win_rate_and_the_total(conn):
+    _sell_trade(conn, "じっくり", pnl=20000, days=30)
+    _sell_trade(conn, "じっくり", pnl=-7000, days=12)
+    _sell_trade(conn, "じっくり", pnl=15000, days=40)
+    _sell_trade(conn, "回転", pnl=-3000, days=8)
+
+    rows = {r["bucket"]: r for r in select_bucket_performance(conn)}
+
+    patient = rows["じっくり"]
+    assert patient["closed"] == 3
+    assert patient["wins"] == 2
+    assert patient["win_rate"] == pytest.approx(2 / 3)
+    assert patient["total_pnl"] == pytest.approx(28000.0)
+    assert patient["avg_holding_days"] == pytest.approx((30 + 12 + 40) / 3)
+
+    fast = rows["回転"]
+    assert fast["closed"] == 1
+    assert fast["wins"] == 0
+    assert fast["win_rate"] == pytest.approx(0.0)
+
+
+def test_bucket_performance_includes_the_breakeven_win_rate_to_compare_against(conn):
+    """勝率だけでは意味がない。損益トントンの勝率と並べて初めて判断できる。
+
+    じっくり枠は 0.08 / (0.22 + 0.08) = 26.7%、
+    回転枠は 0.05 / (0.10 + 0.05) = 33.3%。
+    """
+    rows = {r["bucket"]: r for r in select_bucket_performance(conn)}
+
+    assert rows["じっくり"]["breakeven_win_rate"] == pytest.approx(0.2667, abs=0.001)
+    assert rows["回転"]["breakeven_win_rate"] == pytest.approx(0.3333, abs=0.001)
+
+
+def test_bucket_performance_lists_every_bucket_even_with_no_trades(conn):
+    """まだ1件も決着していない枠も、0件として出す。
+
+    行が消えると「まだ始まっていない」のか「集計から漏れた」のか分からない。
+    """
+    rows = select_bucket_performance(conn)
+
+    assert [r["bucket"] for r in rows] == ["じっくり", "回転"]
+    assert all(r["closed"] == 0 for r in rows)
+    assert all(r["win_rate"] is None for r in rows)          # 0件なら勝率は「無い」
+    assert all(r["avg_holding_days"] is None for r in rows)
