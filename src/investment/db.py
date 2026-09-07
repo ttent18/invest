@@ -107,3 +107,17 @@ def record_gap(conn, scope: str, detail: str) -> None:
             (scope, detail),
         )
     conn.commit()
+
+
+def select_positions(conn) -> list[dict]:
+    """現在の保有を返す。"""
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM positions ORDER BY symbol")
+        return list(cur.fetchall())
+
+
+def select_cash(conn) -> dict[str, float]:
+    """通貨ごとの現金残高を返す。"""
+    with conn.cursor() as cur:
+        cur.execute("SELECT currency, amount FROM cash")
+        return {r["currency"]: float(r["amount"]) for r in cur.fetchall()}
