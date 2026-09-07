@@ -12,6 +12,7 @@ from investment.db import (
     mark_fill_failed,
     record_gap,
     record_gaps,
+    save_last_prices,
     select_bucket_performance,
     select_capital,
     select_push_subscriptions,
@@ -482,3 +483,35 @@ def test_bucket_performance_lists_every_bucket_even_with_no_trades(conn):
     assert all(r["closed"] == 0 for r in rows)
     assert all(r["win_rate"] is None for r in rows)          # 0件なら勝率は「無い」
     assert all(r["avg_holding_days"] is None for r in rows)
+
+
+def test_save_last_prices_updates_only_the_symbols_given(conn):
+    """取れた銘柄だけ更新し、取れなかった銘柄の古い値を消さないこと。
+
+    古い値が残っていれば「いつ時点の値か」を添えて表示できる。
+    消してしまうと、画面に何も出せなくなる。
+    """
+    with conn.cursor() as cur:
+        for sym in ("1111.T", "2222.T"):
+            cur.execute(
+                """
+                INSERT INTO positions
+                    (symbol, quantity, avg_price, currency, take_profit, stop_loss,
+                     opened_at, bucket, last_price, last_price_at)
+                VALUES (%s, 100, 900, 'JPY', 1098, 828, NOW(), 'じっくり', 850, NOW())
+                """,
+                (sym,),
+            )
+    conn.commit()
+
+    assert save_last_prices(conn, {"1111.T": 910.0}) == 1
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT symbol, last_price FROM positions ORDER BY symbol")
+        rows = {r["symbol"]: float(r["last_price"]) for r in cur.fetchall()}
+    assert rows["1111.T"] == 910.0     # 更新された
+    assert rows["2222.T"] == 850.0     # 古い値が残っている
+
+
+def test_save_last_prices_with_nothing_to_save_writes_nothing(conn):
+    assert save_last_prices(conn, {}) == 0

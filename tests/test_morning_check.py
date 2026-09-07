@@ -124,9 +124,15 @@ def test_run_does_not_query_before_opened_at():
     positions = [
         {"symbol": "3993.T", "take_profit": 2989.0, "stop_loss": 2254.0, "opened_at": opened},
     ]
-    with patch(
-        "investment.jobs.morning_check.fetch_range", return_value=(2500.0, 2400.0)
-    ) as fr:
+    with (
+        patch(
+            "investment.jobs.morning_check.fetch_range", return_value=(2500.0, 2400.0)
+        ) as fr,
+        # run() は値動きが取れた銘柄について画面用の終値も取りに行くようになった。
+        # 差し替えないと本物の yfinance に問い合わせに行ってしまう。
+        patch("investment.jobs.morning_check.fetch_last_price", return_value=2450.0),
+        patch("investment.jobs.morning_check.save_last_prices"),
+    ):
         run(positions, conn=None, today=TODAY)
 
     fr.assert_called_once_with("3993.T", opened, TODAY - timedelta(days=1))
@@ -139,7 +145,11 @@ def test_run_detects_hit_found_anywhere_in_window():
             return (2500.0, 2200.0)  # 安値が損切りを下回った
         return (200.0, 190.0)
 
-    with patch("investment.jobs.morning_check.fetch_range", side_effect=fake_fetch):
+    with (
+        patch("investment.jobs.morning_check.fetch_range", side_effect=fake_fetch),
+        patch("investment.jobs.morning_check.fetch_last_price", return_value=200.0),
+        patch("investment.jobs.morning_check.save_last_prices"),
+    ):
         hits, failed, attempted = run(RUN_POSITIONS, conn=None, today=TODAY)
 
     assert [h["symbol"] for h in hits] == ["3993.T"]
@@ -156,6 +166,8 @@ def test_run_counts_failures_and_records_gap():
     with (
         patch("investment.jobs.morning_check.fetch_range", side_effect=fake_fetch),
         patch("investment.jobs.morning_check.record_gap") as gap,
+        patch("investment.jobs.morning_check.fetch_last_price", return_value=200.0),
+        patch("investment.jobs.morning_check.save_last_prices"),
     ):
         hits, failed, attempted = run(RUN_POSITIONS, conn=None, today=TODAY)
 
@@ -392,6 +404,44 @@ def test_main_does_not_notify_when_no_position_had_a_window_to_check():
         main()
 
     notify.assert_not_called()
+
+
+def test_run_saves_the_prices_it_managed_to_fetch():
+    """朝の確認が取れた株価を保存すること。画面が含み損益を出すのに使う。"""
+    positions = [
+        {"symbol": "1111.T", "bucket": "じっくり", "quantity": 100, "avg_price": 900,
+         "take_profit": 1098, "stop_loss": 828, "opened_at": date(2026, 9, 1)},
+        {"symbol": "2222.T", "bucket": "じっくり", "quantity": 100, "avg_price": 800,
+         "take_profit": 976, "stop_loss": 736, "opened_at": date(2026, 9, 1)},
+    ]
+
+    def fake_range(symbol, start, end):
+        if symbol == "2222.T":
+            raise MarketDataError("取れません")
+        return (920.0, 880.0)   # (高値, 安値)
+
+    with (
+        patch("investment.jobs.morning_check.fetch_range", side_effect=fake_range),
+        # ブリーフ原文には無かったが、fetch_last_price を差し替えないと
+        # 1111.T の終値を本物の yfinance へ問い合わせに行ってしまう
+        # （実データへ接続するテストを書かないという方針に反する）。
+        patch("investment.jobs.morning_check.fetch_last_price", return_value=910.0),
+        # ブリーフ原文は record_gaps（複数形）をパッチしていたが、
+        # morning_check.py が実際に呼ぶのは record_gap（単数形、値動きが
+        # 1件取れなかったことをその場で記録する既存の関数）。record_gaps
+        # という属性はモジュールに存在せず、そのままだと patch がここで
+        # AttributeError になり、2222.T の失敗を記録しようとして
+        # conn=None の本物の record_gap が呼ばれて落ちる（同じファイルの
+        # test_run_counts_failures_and_records_gap も record_gap をパッチ
+        # している）。誤記と判断し、実際に呼ばれる名前に合わせた。
+        patch("investment.jobs.morning_check.record_gap"),
+        patch("investment.jobs.morning_check.save_last_prices") as save,
+    ):
+        run(positions, conn=None, today=date(2026, 9, 8))
+
+    # 取れた銘柄だけを渡す。取れなかった銘柄は含めない
+    saved = save.call_args.args[1]
+    assert list(saved) == ["1111.T"]
 
 
 def test_main_notifies_when_a_position_passed_its_deadline():

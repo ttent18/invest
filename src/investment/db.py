@@ -327,6 +327,28 @@ def save_fill_result(
     conn.commit()
 
 
+def save_last_prices(conn, prices: dict[str, float]) -> int:
+    """最後に見た株価を保有に保存する。戻り値は更新した件数。
+
+    渡された銘柄だけを更新する。取れなかった銘柄の古い値は消さない。
+    古い値でも「いつ時点か」を添えれば画面に出せるが、消すと何も出せなくなる。
+    """
+    if not prices:
+        return 0
+    with conn.cursor() as cur:
+        cur.executemany(
+            """
+            UPDATE positions
+            SET last_price = %s, last_price_at = NOW()
+            WHERE symbol = %s
+            """,
+            [(price, symbol) for symbol, price in prices.items()],
+        )
+        updated = cur.rowcount
+    conn.commit()
+    return updated
+
+
 def select_bucket_performance(conn) -> list[dict]:
     """枠ごとの成績を返す。「どちらの型が向いているか」を測るための表。
 

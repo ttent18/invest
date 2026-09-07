@@ -16,8 +16,8 @@ from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from investment.config import bucket_by_name
-from investment.db import connect, record_gap, select_positions
-from investment.market import MarketDataError, fetch_range
+from investment.db import connect, record_gap, save_last_prices, select_positions
+from investment.market import MarketDataError, fetch_last_price, fetch_range
 from investment.notify import send as notify_send
 
 JST = ZoneInfo("Asia/Tokyo")  # 「今日」は日本時間で決める（GitHub Actions は UTC で動くため）
@@ -132,8 +132,14 @@ def run(positions: list[dict], conn, today: date) -> tuple[list[dict], int, int]
     「判定対象になった件数」(attempted) は、確認すべき期間がある銘柄の数。
     まだ確認すべき期間がない銘柄（今日開いたばかりなど）は含めない
     （取得を試みてすらいないので、失敗としてもカウントしない）。
+
+    値動きの取得に成功した銘柄については、画面に含み損益を出すための終値も
+    ついでに取って保存する（Cloudflare 側からは株価を取れないため、
+    ここで見た値を保存しておく）。終値の取得に失敗しても、損切り・利確に
+    到達した可能性の判定は続ける（そちらのほうが重要なため）。
     """
     ranges: dict[str, tuple[float, float]] = {}
+    last_prices: dict[str, float] = {}
     failed = 0
     attempted = 0
     for p in positions:
@@ -148,8 +154,17 @@ def run(positions: list[dict], conn, today: date) -> tuple[list[dict], int, int]
         except MarketDataError as exc:
             failed += 1
             record_gap(conn, scope=f"daily_range:{p['symbol']}", detail=str(exc))
+            continue
+
+        # 値動きの取得に成功した銘柄について、画面に出す用の終値も取る。
+        # ここが失敗しても、売れた可能性の判定は続ける（通知のほうが重要）。
+        try:
+            last_prices[p["symbol"]] = fetch_last_price(p["symbol"])
+        except MarketDataError:
+            pass
 
     hits = detect_hits(positions, ranges)
+    save_last_prices(conn, last_prices)
     return hits, failed, attempted
 
 
