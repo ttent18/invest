@@ -47,6 +47,10 @@ export const SETTINGS = {
 // 上昇率・下落率）を使うと gain = take_profit_pct、loss = stop_loss_pct に
 // なり、entry 自体は消える（日本株の往復手数料 fee_rate は 0 のため、
 // fee_rate の項も消える）。そのため、率だけから直接この式で求められる。
+//
+// 米国株を有効にするときは、この関数も直すこと。米国株には手数料
+// （src/investment/config.py の us_fee_rate）があるため、fee_rate の項が
+// 消えなくなり、この式は成り立たなくなる。
 export function breakevenWinRate(bucket) {
   const { take_profit_pct, stop_loss_pct } = bucket;
   return stop_loss_pct / (take_profit_pct + stop_loss_pct);

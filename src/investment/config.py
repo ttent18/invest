@@ -68,6 +68,11 @@ SETTINGS = Settings(
     us_fee_rate=0.01,
 )
 
+# 注意: functions/_shared/config.js に BUCKETS・SETTINGS（max_position_pct・
+# risk_per_trade_pct）の写しがある。JavaScript 側にはPythonの値を共有する
+# 仕組みが無いため。ここの率を直すときは functions/_shared/config.js も
+# 直すこと。片方だけを直しても、どちらのプログラムもエラーにはならない
+# （動くが数字が食い違う）。
 BUCKETS = (
     Bucket("じっくり", slots=2, take_profit_pct=0.22, stop_loss_pct=0.08, max_holding_days=None),
     Bucket("回転", slots=2, take_profit_pct=0.10, stop_loss_pct=0.05, max_holding_days=10),

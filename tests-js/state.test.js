@@ -116,6 +116,28 @@ describe("枠ごとの使用状況（used / free）", () => {
     expect(buckets.find((b) => b.name === "じっくり").free).toBe(1);
     expect(buckets.find((b) => b.name === "回転").free).toBe(2);
   });
+
+  it("全体の残り枠で頭打ちになる（じっくりが3件で埋まっていれば、回転の空きは自前の2ではなく全体の残り1に抑えられる）", () => {
+    // MAX_POSITIONS は4（じっくり2 + 回転2）。じっくりに3件を積むと
+    // （本来の枠数2を超えるが、データ上は起こりうる）全体の残りは
+    // 4 - 3 = 1 になる。回転は自前では2件空いているはずだが、
+    // 全体の残りを超えて「空いている」と出してはいけない。
+    const position = {
+      bucket: "じっくり", quantity: 100, avg_price: "899",
+      take_profit: "1096.78", stop_loss: "827.08", opened_at: "2026-09-01T00:00:00Z",
+      last_price: null, last_price_at: null,
+    };
+    const buckets = buildState(
+      base({
+        positionRows: [
+          { ...position, symbol: "1111.T" },
+          { ...position, symbol: "2222.T" },
+          { ...position, symbol: "3333.T" },
+        ],
+      })
+    ).buckets;
+    expect(buckets.find((b) => b.name === "回転").free).toBe(1);
+  });
 });
 
 describe("枠ごとの成績（SQLの行をそのまま使い、勝率だけPythonと同じ形で導く）", () => {
@@ -147,12 +169,12 @@ describe("枠ごとの成績（SQLの行をそのまま使い、勝率だけPyth
 });
 
 describe("提案（pending の一覧）", () => {
-  it("cost は quantity × entry_price、days_old は created_at からの日数", () => {
+  it("買いの提案は action: 'buy' で、cost は quantity × entry_price", () => {
     const proposals = buildState(
       base({
         proposalRows: [
           {
-            id: "3", symbol: "156A.T", bucket: "じっくり", quantity: 100, entry_price: "899",
+            id: "3", symbol: "156A.T", action: "buy", bucket: "じっくり", quantity: 100, entry_price: "899",
             take_profit: "1096.78", stop_loss: "827.08", rationale: "…", scenario: "…",
             confidence: "mid", created_at: "2026-09-07T01:30:00.000Z",
           },
@@ -160,7 +182,39 @@ describe("提案（pending の一覧）", () => {
       })
     ).proposals;
     expect(proposals[0].id).toBe(3);
+    expect(proposals[0].action).toBe("buy");
     expect(proposals[0].cost).toBe(89900);
+  });
+
+  it("売りの提案は action: 'sell' で、cost は null（entry_price は保有時点の買値の転記であって売値ではないため、株数と掛けても投資額にならない）", () => {
+    const proposals = buildState(
+      base({
+        proposalRows: [
+          {
+            id: "4", symbol: "156A.T", action: "sell", bucket: "じっくり", quantity: 100, entry_price: "899",
+            take_profit: "1096.78", stop_loss: "827.08", rationale: "…", scenario: "…",
+            confidence: "mid", created_at: "2026-09-07T01:30:00.000Z",
+          },
+        ],
+      })
+    ).proposals;
+    expect(proposals[0].action).toBe("sell");
+    expect(proposals[0].cost).toBe(null);
+  });
+
+  it("days_old は日本時間の日付の差。朝10:30に出た提案を翌朝9:30に見ると、まだ24時間経っていなくても1になる", () => {
+    const proposals = buildState(
+      base({
+        now: new Date("2026-09-09T00:30:00.000Z"), // JST 2026-09-09 09:30
+        proposalRows: [
+          {
+            id: "5", symbol: "156A.T", action: "buy", bucket: "じっくり", quantity: 100, entry_price: "899",
+            take_profit: "1096.78", stop_loss: "827.08", rationale: "…", scenario: "…",
+            confidence: "mid", created_at: "2026-09-08T01:30:00.000Z", // JST 2026-09-08 10:30
+          },
+        ],
+      })
+    ).proposals;
     expect(proposals[0].days_old).toBe(1);
   });
 });

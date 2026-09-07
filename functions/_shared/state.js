@@ -84,27 +84,47 @@ function buildBuckets(positionRows) {
   });
 }
 
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+const JST_OFFSET_MS = 9 * 60 * 60 * 1000;
+
+// 日本時間（UTC+9）の「日付」だけを比べて、何日前かを出す。
+// 単純に経過ミリ秒を24時間で割ると、朝10:30に出た提案を翌朝9:30に
+// 見たときに「まだ24時間経っていない」という理由で 0 と出てしまい、
+// 実際には日付をまたいでいるのに「今日の提案」に見えてしまう
+// （古い提案に気づけない方向にずれる）。ここでは時刻を無視して、
+// 日本時間のカレンダー上の日付がいくつ違うかだけを見る。
+function jstDayNumber(date) {
+  return Math.floor((date.getTime() + JST_OFFSET_MS) / MS_PER_DAY);
+}
+
 function buildProposals(proposalRows, now) {
-  const msPerDay = 24 * 60 * 60 * 1000;
+  const nowDay = jstDayNumber(now);
   return proposalRows.map((p) => {
     const quantity = num(p.quantity);
     const entryPrice = num(p.entry_price);
+    const isSell = p.action === "sell";
     return {
       id: num(p.id),
       symbol: p.symbol,
+      // 'buy'（買い）か 'sell'（売り）。画面はこれを見て「買った」ではなく
+      // 「売った」のカードを出す必要がある。落とすと、売るべき提案が
+      // 買いの提案として表示され、利用者が逆の注文を出しかねない。
+      action: p.action,
       bucket: p.bucket,
       quantity,
       entry_price: entryPrice,
       take_profit: num(p.take_profit),
       stop_loss: num(p.stop_loss),
-      // 表示用の投資額（株数 × 買値）。保有株数や平均取得単価のような、
-      // 複数の申告を積み上げて出す値ではないので、ここで計算してよい。
-      cost: quantity * entryPrice,
+      // 表示用の投資額（株数 × 買値）。売りの提案では entry_price は
+      // 「売値」ではなく保有時点の買値の転記（migrations/001_initial.sql
+      // 参照）なので、株数と掛けても投資額にならない。誤解を招く数字を
+      // 出すくらいなら「分からない」を表す null にする。
+      cost: isSell ? null : quantity * entryPrice,
       rationale: p.rationale,
       scenario: p.scenario,
       confidence: p.confidence,
       created_at: p.created_at,
-      days_old: Math.floor((now.getTime() - new Date(p.created_at).getTime()) / msPerDay),
+      days_old: nowDay - jstDayNumber(new Date(p.created_at)),
     };
   });
 }

@@ -8,6 +8,11 @@ import { buildState } from "../_shared/state.js";
 //   select_positions            → positions
 //   select_cash                 → cash
 //   select_capital              → cash(JPY) の合計 + positions(JPY) の取得原価の合計
+//                                  （Python側が同じ接続の中の2本の問い合わせを
+//                                  足しているのに合わせ、こちらも1本のSQLの中で
+//                                  足す。JavaScript側で2回のHTTP問い合わせの
+//                                  結果を後から足すと、その間に別の変更が挟まり
+//                                  ずれる窓が広くなるため）
 //   select_unapplied_fills      → fills（未反映のみ）
 //   select_bucket_performance   → trades（売り・枠ありのみ）を枠ごとに集計
 // proposals は Python 側に対応する読み取り関数が無いため、契約が指定する
@@ -25,16 +30,21 @@ export async function onRequestGet({ env }) {
 
     const [
       cashRows,
-      jpyCashRow,
-      jpyHeldRow,
+      capitalRows,
       positionRows,
       proposalRows,
       fillRows,
       performanceRows,
     ] = await Promise.all([
       sql`SELECT currency, amount FROM cash`,
-      sql`SELECT COALESCE(SUM(amount), 0) AS c FROM cash WHERE currency = 'JPY'`,
-      sql`SELECT COALESCE(SUM(quantity * avg_price), 0) AS c FROM positions WHERE currency = 'JPY'`,
+      // src/investment/db.py の select_capital と同じ、現金(JPY)の合計と
+      // 保有(JPY)の取得原価の合計を、1本のSQLの中で足す。
+      sql`
+        SELECT
+          (SELECT COALESCE(SUM(amount), 0) FROM cash WHERE currency = 'JPY') +
+          (SELECT COALESCE(SUM(quantity * avg_price), 0) FROM positions WHERE currency = 'JPY')
+          AS c
+      `,
       sql`SELECT * FROM positions ORDER BY symbol`,
       sql`SELECT * FROM proposals WHERE outcome = 'pending' ORDER BY id`,
       sql`SELECT * FROM fills WHERE applied_at IS NULL ORDER BY id`,
@@ -50,7 +60,7 @@ export async function onRequestGet({ env }) {
       `,
     ]);
 
-    const capital = Number(jpyCashRow[0].c) + Number(jpyHeldRow[0].c);
+    const capital = Number(capitalRows[0].c);
 
     const state = buildState({
       now: new Date(),
