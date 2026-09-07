@@ -249,3 +249,91 @@ export function renderNav(active) {
   }
   return nav;
 }
+
+// ---------------------------------------------------------------------------
+// 「保有」「収支」画面のための追加の整形（Task 8）
+//
+// ここから下は、/api/state がそのまま返してはくれない表示専用の値を
+// 作るための、小さな純粋関数だけを置く。**積み上げ計算（含み損益の
+// 合計や枠の成績のような、複数の行にまたがる集計）はしない**。
+// それはサーバー側（functions/_shared/state.js）の仕事のまま。
+// ここにあるのは「サーバーがすでに返した1つ・2つの値を、その場で
+// 見やすい形に直すだけ」の関数に限る。
+// ---------------------------------------------------------------------------
+
+// yen() は符号を付けない（1,100円 / -1,100円）。含み益・確定損益のように
+// 「プラスのときは +1,100円 と出したい」場面専用の、符号付きの整形。
+export function signedYen(n) {
+  if (n === null || n === undefined || typeof n !== "number" || Number.isNaN(n)) {
+    return "—";
+  }
+  const rounded = Math.round(n);
+  const sign = rounded > 0 ? "+" : "";
+  return `${sign}${rounded.toLocaleString("ja-JP")}円`;
+}
+
+// 0.267 → "26.7%"。勝率・損益トントンの勝率のような「0〜100%の割合」用。
+// pct() は値上がり率のように +/- の符号を付けるための整形なので、
+// 符号を付けたくない割合の表示にはこちらを使う。
+export function ratePct(n) {
+  if (n === null || n === undefined || typeof n !== "number" || Number.isNaN(n)) {
+    return "—";
+  }
+  return `${(n * 100).toFixed(1)}%`;
+}
+
+// 現在値から、利確・損切りのライン（1つの値）までの距離を率で返す。
+// (target - from) / from という、含み損益率と同じ形のその場の割り算で、
+// 複数行の積み上げ計算ではない。
+// from（現在値）が無ければ距離も出しようがないので null（0にしない）。
+export function distancePct(fromPrice, toPrice) {
+  if (
+    fromPrice === null ||
+    fromPrice === undefined ||
+    !Number.isFinite(fromPrice) ||
+    fromPrice === 0 ||
+    toPrice === null ||
+    toPrice === undefined ||
+    !Number.isFinite(toPrice)
+  ) {
+    return null;
+  }
+  return (toPrice - fromPrice) / fromPrice;
+}
+
+// 回転枠の「期限」表示のための、保有を始めてからの経過営業日数。
+//
+// **重要な注意（機能不足の告知）**: /api/state の positions には
+// 保有を始めた日時（opened_at）はあるが、経過営業日そのものは入っていない
+// （functions/_shared/state.js を確認したがそのような項目は無い）。
+// 表示のためにここで数える。ただし、このファイルには祝日カレンダーが
+// 無いため、**土日だけを除き、日本の祝日は考慮できない。**
+// そのため、祝日がある週をまたぐ保有は、実際の営業日経過数より
+// 「多め」に数えてしまう方向にずれる（少なく数えて期限切れを
+// 見逃す方向には、ずれない）。回転枠の期限は「値動きに関係なく降りる」
+// ための注意喚起なので、早めに出る分には実害が小さいと判断した。
+//
+// nowIso は state.generated_at（サーバーの時計）を渡すこと。
+// 端末の時計をそのまま信用しない。
+export function businessDaysElapsed(openedAtIso, nowIso) {
+  if (!openedAtIso || !nowIso) return null;
+  const start = new Date(openedAtIso);
+  const end = new Date(nowIso);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return null;
+
+  const JST_OFFSET_MS = 9 * 60 * 60 * 1000;
+  const MS_PER_DAY = 24 * 60 * 60 * 1000;
+  // functions/_shared/state.js の jstDayNumber と同じ考え方（日本時間の
+  // カレンダー日だけを見て、時刻は無視する）。
+  const jstDayNumber = (d) => Math.floor((d.getTime() + JST_OFFSET_MS) / MS_PER_DAY);
+
+  const startDay = jstDayNumber(start);
+  const endDay = jstDayNumber(end);
+  let count = 0;
+  for (let day = startDay + 1; day <= endDay; day++) {
+    const utcMsOfThatJstMidnight = day * MS_PER_DAY - JST_OFFSET_MS;
+    const dow = new Date(utcMsOfThatJstMidnight).getUTCDay(); // 0=日, 6=土
+    if (dow !== 0 && dow !== 6) count++;
+  }
+  return count;
+}

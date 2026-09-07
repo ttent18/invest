@@ -520,3 +520,88 @@ button:disabled,
 [hidden] {
   display: none !important;
 }
+
+/* ------------------------------------------------------------------ */
+/* 保有カード（figure の補足テキスト、含み損の色） */
+/* ------------------------------------------------------------------ */
+
+.figure-hint {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 2px;
+}
+
+.figure-value-loss {
+  color: var(--danger);
+}
+
+/* 回転枠の期限切れ：カードの最上部に出す赤い注意書き */
+.expiry-block {
+  background: var(--danger-bg);
+  border: 2px solid var(--danger);
+  border-radius: 12px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+}
+
+.expiry-title {
+  font-size: 15px;
+  font-weight: 800;
+  color: var(--danger);
+}
+
+.expiry-note {
+  font-size: 13px;
+  color: #ffb3b3;
+  margin-top: 2px;
+}
+
+/* 一部だけ売るときの注意（予約注文の株数がずれる） */
+.warn-box {
+  background: var(--warn-bg);
+  border: 1px solid var(--warn);
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 13px;
+  color: var(--warn);
+  margin: -4px 0 12px;
+  line-height: 1.5;
+}
+
+/* ------------------------------------------------------------------ */
+/* 収支：枠ごとの成績の表 */
+/* ------------------------------------------------------------------ */
+
+.perf-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+  margin-top: 8px;
+}
+
+.perf-table th,
+.perf-table td {
+  padding: 8px 4px;
+  text-align: center;
+  border-bottom: 1px solid var(--border);
+}
+
+.perf-table th:first-child,
+.perf-table td:first-child {
+  text-align: left;
+}
+
+.perf-table thead-blank {
+  border: none;
+}
+
+.perf-row-label {
+  color: var(--muted);
+  font-weight: 400;
+  font-size: 13px;
+}
+
+.perf-table tr:last-child th,
+.perf-table tr:last-child td {
+  border-bottom: none;
+}
