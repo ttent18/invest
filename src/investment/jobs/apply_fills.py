@@ -22,6 +22,7 @@ from investment.db import (
     select_unapplied_fills,
 )
 from investment.fills import FillError, Position, apply_buy, apply_sell
+from investment.notify import send as notify_send
 
 JST = ZoneInfo("Asia/Tokyo")
 
@@ -131,21 +132,27 @@ def run(conn, today: date) -> tuple[int, int]:
                 row["recorded_at"],
                 proposal_id=row["proposal_id"],
             )
-        except FillError as exc:
+        except Exception as exc:  # noqa: BLE001 - 理由は下のコメントを参照
+            # 想定外の例外も含めて捕まえる。1件の申告の失敗で、残りの申告と
+            # ワークフローの後続を道連れにしないため。狭く捕まえる利点
+            # （想定外の例外に気づける）は、apply_error に必ず理由を残すことで
+            # 代替している。notify.send と同じ考え方。
+            #
             # save_fill_result が現金の反映などに失敗して例外を出した場合、
             # そこまでに書いた取引・保有・提案の更新はまだコミットされて
             # いない。ここで rollback しないと、直後の mark_fill_failed の
             # commit がその未確定分もろとも確定させてしまい、「現金だけ
             # 動かない」という一番避けたい壊れ方になる。
-            conn.rollback()
             failed += 1
+            conn.rollback()
             mark_fill_failed(conn, row["id"], str(exc))
             print(f"反映できません #{row['id']} {fill['symbol']}: {exc}")
             continue
 
         ok += 1
+        side_label = "買い" if fill["side"] == "buy" else "売り"
         print(
-            f"反映しました #{row['id']} {fill['symbol']} {fill['side']} "
+            f"反映しました #{row['id']} {fill['symbol']} {side_label} "
             f"{fill['quantity']}株 × {fill['price']:,.0f}円"
         )
 
@@ -162,6 +169,18 @@ def main() -> int:
     # 反映できなかったものがあっても、ジョブ自体は成功とする。
     # 理由は fills に残っており、画面に出るため。ここで失敗にすると、
     # 利用者の入力ミス1件でワークフロー全体が赤くなる。
+
+    # 反映できなかった記録があることを利用者に届ける。これまでは
+    # fills.apply_error に溜まるだけで、ジョブは成功扱い・通知なしだった。
+    # 記録は残っていても、気づけなければ無いのと同じ。
+    if failed:
+        with connect() as conn:
+            notify_send(
+                conn,
+                title="記録できていない売買があります",
+                body=f"{failed} 件。画面を開いて内容を確かめてください",
+                url="/",
+            )
     return 0
 
 

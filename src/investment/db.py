@@ -312,8 +312,9 @@ def save_fill_result(
         # 全体を取り消す（fills も未反映のまま残るので、あとで気づける）。
         if cur.rowcount == 0:
             raise FillError(
-                f"現金（{currency}）の残高が登録されていません。"
-                "init_cash などで先に現金の行を作ってください"
+                f"現金（{currency}）の残高の記録が見つかりません。"
+                f"{trade['symbol']} の{'買い' if trade['side'] == 'buy' else '売り'}"
+                "を反映できませんでした。設定を確認してください"
             )
         cur.execute(
             "UPDATE fills SET applied_at = NOW(), apply_error = NULL WHERE id = %s",

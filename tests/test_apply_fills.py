@@ -5,10 +5,11 @@ from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
+import investment.db
 from investment.config import bucket_by_name
 from investment.db import apply_migrations, connect, init_cash, save_fill_result
 from investment.fills import apply_buy
-from investment.jobs.apply_fills import run
+from investment.jobs.apply_fills import main, run
 
 pytestmark = pytest.mark.integration
 
@@ -478,3 +479,85 @@ def test_a_missing_cash_row_leaves_the_fill_unapplied_with_a_reason(conn):
         # 取り消されるなら提案も一緒に取り消される。ここで taken に
         # なっていたら、反映されていないのに実行済み扱いになる欠陥。
         assert cur.fetchone()["outcome"] == "pending"
+
+
+def test_a_database_error_on_one_fill_does_not_stop_the_others(conn):
+    """1件の申告でデータベース側のエラーが起きても、他の申告は反映されること。
+
+    これまで run() は FillError しか捕まえていなかった。計画2-B で画面から
+    入る申告の種類が増えるため、想定外の失敗で残り全部が道連れになる形を
+    先に塞ぐ。notify.send と同じ理由。
+    """
+    from unittest.mock import patch
+
+    pid = _proposal(conn, "1111.T", "じっくり")
+    _fill(conn, proposal_id=pid, symbol="1111.T", side="buy", quantity=100, price=900)
+    pid2 = _proposal(conn, "2222.T", "じっくり")
+    _fill(conn, proposal_id=pid2, symbol="2222.T", side="buy", quantity=100, price=800)
+
+    calls = {"n": 0}
+    real = investment.db.save_fill_result
+
+    def fail_first(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("データベース側の想定外のエラー")
+        return real(*args, **kwargs)
+
+    with patch("investment.jobs.apply_fills.save_fill_result", side_effect=fail_first):
+        ok, failed = run(conn, today=date(2026, 9, 8))
+
+    assert (ok, failed) == (1, 1)
+    with conn.cursor() as cur:
+        cur.execute("SELECT symbol FROM positions")
+        assert [r["symbol"] for r in cur.fetchall()] == ["2222.T"]
+        cur.execute("SELECT apply_error FROM fills WHERE symbol = '1111.T'")
+        assert "想定外" in cur.fetchone()["apply_error"]
+
+
+def test_main_notifies_when_some_fills_could_not_be_applied(tmp_path):
+    """反映できなかった記録があることを、利用者に届けること。
+
+    これまでは fills.apply_error に溜まるだけで、ジョブは成功扱い・通知なしだった。
+    「データを黙って落とさない」は満たしていたが、「気づける」は満たしていなかった。
+    """
+    from unittest.mock import patch
+
+    class FakeConn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    with (
+        patch("investment.jobs.apply_fills.connect", side_effect=lambda: FakeConn()),
+        patch("investment.jobs.apply_fills.run", return_value=(0, 2)),
+        patch("investment.jobs.apply_fills.select_capital", return_value=550_000.0),
+        patch("investment.jobs.apply_fills.notify_send") as notify,
+    ):
+        assert main() == 0
+
+    notify.assert_called_once()
+    assert "2" in notify.call_args.kwargs["title"] or "2" in notify.call_args.kwargs["body"]
+
+
+def test_main_does_not_notify_when_everything_was_applied(tmp_path):
+    from unittest.mock import patch
+
+    class FakeConn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    with (
+        patch("investment.jobs.apply_fills.connect", side_effect=lambda: FakeConn()),
+        patch("investment.jobs.apply_fills.run", return_value=(2, 0)),
+        patch("investment.jobs.apply_fills.select_capital", return_value=550_000.0),
+        patch("investment.jobs.apply_fills.notify_send") as notify,
+    ):
+        assert main() == 0
+
+    notify.assert_not_called()
