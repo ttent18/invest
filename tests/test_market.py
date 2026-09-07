@@ -30,3 +30,20 @@ def test_is_japanese(symbol, expected):
 def test_normalize_symbol_rejects_empty():
     with pytest.raises(ValueError):
         normalize_symbol("   ")
+
+
+from investment.market import Fundamentals
+
+
+def test_fundamentals_holds_optional_values():
+    f = Fundamentals(
+        symbol="9999.T",
+        name="テスト",
+        market_cap=None,
+        revenue_growth=None,
+        operating_margin=None,
+        roe=None,
+        equity_ratio=None,
+    )
+    assert f.symbol == "9999.T"
+    assert f.market_cap is None

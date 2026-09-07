@@ -1,5 +1,23 @@
 """株価と財務データの取得。判定は行わない。"""
 
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class Fundamentals:
+    """1銘柄の財務指標。取得できなかった項目は None。
+
+    None を 0 で埋めない。取得失敗と「値が0」を区別する必要がある。
+    """
+
+    symbol: str
+    name: str
+    market_cap: float | None
+    revenue_growth: float | None
+    operating_margin: float | None
+    roe: float | None
+    equity_ratio: float | None
+
 
 def normalize_symbol(code: str) -> str:
     """銘柄コードを yfinance が受け取る形に整える。
