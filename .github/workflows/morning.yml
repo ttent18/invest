@@ -1,0 +1,24 @@
+name: morning
+
+on:
+  schedule:
+    - cron: "0 22 * * 0-4"   # 22:00 UTC = 翌 7:00 JST（月〜金の朝）
+  workflow_dispatch:
+
+jobs:
+  morning:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - run: uv sync
+      - run: uv run python -m investment.jobs.morning_check
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          # このプロジェクトはパッケージとしてインストールされていないため、
+          # `python -m investment...` が import できるよう src を明示的に追加する。
+          # （screen.yml / analyze.yml と同じ理由。無いと ModuleNotFoundError で必ず失敗する）
+          PYTHONPATH: src
