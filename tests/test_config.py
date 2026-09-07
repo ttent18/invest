@@ -2,7 +2,7 @@ from investment.config import BUCKETS, MAX_POSITIONS, SCREEN, SETTINGS, bucket_b
 
 
 def test_settings_match_the_rules_document():
-    assert SETTINGS.total_capital == 550_000
+    assert SETTINGS.initial_capital == 550_000
     assert SETTINGS.max_position_pct == 0.25
     assert SETTINGS.risk_per_trade_pct == 0.02
     assert SETTINGS.jp_fee_rate == 0.0

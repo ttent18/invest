@@ -7,11 +7,13 @@ dependencies = [
     "psycopg[binary]>=3.2",
     "python-dotenv>=1.0",
     "openpyxl>=3.1.5",
+    "pywebpush>=2.0",
 ]
 
 [dependency-groups]
 dev = [
     "pytest>=8.0",
+    "pyyaml>=6.0.3",
     "ruff>=0.8",
 ]
 

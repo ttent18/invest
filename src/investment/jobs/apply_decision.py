@@ -8,8 +8,9 @@ import sys
 from pathlib import Path
 
 from investment.config import BUCKETS, MAX_POSITIONS, SETTINGS, Settings, bucket_by_name
-from investment.db import connect, record_gap
+from investment.db import connect, record_gap, select_capital
 from investment.market import is_japanese, lot_size
+from investment.notify import send as notify_send
 from investment.sizing import position_size, required_win_rate
 
 REQUIRED_FIELDS = (
@@ -107,7 +108,11 @@ def _to_positive_int_quantity(decision: dict) -> tuple[int | None, str | None]:
 
 
 def validate(
-    decision: dict, ctx: dict, settings: Settings, taken: dict[str, int] | None = None
+    decision: dict,
+    ctx: dict,
+    settings: Settings,
+    capital: float,
+    taken: dict[str, int] | None = None,
 ) -> list[str]:
     """判断が制約を満たすか調べる。問題があればメッセージを返す。
 
@@ -160,6 +165,26 @@ def validate(
         errors.append("stop_loss < entry_price < take_profit である必要があります")
 
     if decision["action"] == "buy":
+        # 既に保有している銘柄への買いは却下する。build_context.py は保有中の
+        # 銘柄を候補から外しているが、ここでも独立に確かめる（AIが古い候補
+        # リストを見ていた場合などの二重の守り）。
+        #
+        # 買い増しを通してしまうと3つ同時に壊れる。(1) 1銘柄25%の上限は
+        # 1回の提案しか見ておらず、既に持っている分を足し込まないため
+        # 超えてしまう。(2) investment.fills.apply_buy が買い増し時に
+        # 平均取得単価を計算し直し、そこから利確・損切りを引き直すが、
+        # SBIに実際に置いてある逆指値（損切りの予約注文）は古い値のままで、
+        # 誰も置き直さない。以後 morning_check は実在しない注文の価格で
+        # 判定し続けることになる。(3) 買い増しでは positions の行数が
+        # 増えないため、枠の空き数の上でも枠を消費していないことになる。
+        held_symbols = {p["symbol"] for p in ctx.get("positions", [])}
+        if decision["symbol"] in held_symbols:
+            errors.append(
+                "既に保有している銘柄です。買い増すと、SBIに置いてある"
+                "逆指値（この値段まで下がったら売る、という予約注文）が"
+                "古い値のままになり、実際の損切り価格とずれます"
+            )
+
         candidates_by_symbol = {c["symbol"]: c for c in ctx["candidates"]}
         candidate = candidates_by_symbol.get(decision["symbol"])
 
@@ -238,7 +263,7 @@ def validate(
             # 株数を出しがちだが、その答えは実際には発注できないことがある。
             unit = lot_size(decision["symbol"])
             allowed = position_size(
-                settings.total_capital,
+                capital,
                 settings.risk_per_trade_pct,
                 settings.max_position_pct,
                 entry,
@@ -254,8 +279,8 @@ def validate(
                 # 買えない理由は2つある。どちらなのかを見て言い分けること。
                 # まとめて「金額の上限を超える」と言うと、金額は上限内なのに
                 # 「上限を超える」と告げる、それ自体で矛盾したメッセージになる。
-                cap_amount = settings.total_capital * settings.max_position_pct
-                risk_amount = settings.total_capital * settings.risk_per_trade_pct
+                cap_amount = capital * settings.max_position_pct
+                risk_amount = capital * settings.risk_per_trade_pct
                 if entry * unit > cap_amount:
                     errors.append(
                         f"{decision['symbol']} は{unit}株で {entry * unit:,.0f}円 になり、"
@@ -418,7 +443,12 @@ def record_no_proposals(conn, ctx: dict, decisions: list[dict]) -> None:
 
 
 def process(
-    conn, ctx: dict, decisions: list[dict], journal_path: str, settings: Settings
+    conn,
+    ctx: dict,
+    decisions: list[dict],
+    journal_path: str,
+    settings: Settings,
+    capital: float,
 ) -> tuple[int, int]:
     """decisions を検証し、結果に応じて proposals / data_gaps に記録する。
 
@@ -434,7 +464,7 @@ def process(
     mismatches: list[tuple[str, list[str]]] = []
     for d in decisions:
         stated_bucket = d.get("bucket") if d.get("action") == "sell" else None
-        errors = validate(d, ctx, settings, taken)
+        errors = validate(d, ctx, settings, capital, taken)
         if errors:
             rejected.append((d.get("symbol", "?"), errors))
             continue
@@ -555,15 +585,42 @@ def load_decision(path: Path) -> tuple[list[dict], str, tuple[str, str] | None]:
 
 
 def main() -> int:
-    ctx = json.loads(Path("build/context.json").read_text(encoding="utf-8"))
-    decisions, journal_path, missing = load_decision(DECISION_PATH)
-
     with connect() as conn:
+        # 総資金が0円（以下）のときは、ここで止めて記録する。cash に JPY の
+        # 行が無い・消えた場合、select_capital は黙って0.0を返す。それに
+        # 気づかず進むと、1銘柄の上限が0円になって候補が全部除外され、
+        # position_size も0になって全提案が却下される。採用0件の日は
+        # 通知も飛ばないため、「今日は買えるものが無かった」ようにしか
+        # 見えないまま、仕組み全体が誰も気づけないまま止まり続ける。
+        capital = select_capital(conn)
+        if capital <= 0:
+            detail = (
+                "総資金が0円です。現金の記録が入っていない可能性があります"
+                "（investment.jobs.init_portfolio がまだ実行されていない、"
+                "または cash の記録が消えたなど）"
+            )
+            record_gap(conn, scope="capital:zero", detail=detail)
+            print(detail)
+            return 1
+
+        ctx = json.loads(Path("build/context.json").read_text(encoding="utf-8"))
+        decisions, journal_path, missing = load_decision(DECISION_PATH)
         if missing is not None:
             record_gap(conn, scope=missing[0], detail=missing[1])
             print(missing[1])
             return 1
-        process(conn, ctx, decisions, journal_path, SETTINGS)
+        print(f"総資金 {capital:,.0f}円 で検証します")
+        accepted, _rejected = process(conn, ctx, decisions, journal_path, SETTINGS, capital)
+
+        # 「あなたが動く必要がある」ときだけ通知する。
+        # 提案が0件の日に通知すると、通知そのものが意味を失う。
+        if accepted:
+            notify_send(
+                conn,
+                title=f"買う候補が {accepted} 件あります",
+                body="タップして内容を確認してください",
+                url="/",
+            )
 
     return 0
 

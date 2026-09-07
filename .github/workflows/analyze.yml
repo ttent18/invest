@@ -34,6 +34,14 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           PYTHONPATH: src
 
+      - name: 記録された約定を反映する
+        # スマホから「買った/売った」と記録された内容を、保有・現金・履歴に
+        # 反映する。分析より先に行う。反映しないまま分析すると、
+        # 既に買った銘柄をもう一度勧めることになる。
+        run: uv run python -m investment.jobs.apply_fills
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          PYTHONPATH: src
 
       - name: コンテキストを作る
         run: uv run python -m investment.jobs.build_context
@@ -75,6 +83,8 @@ jobs:
         run: uv run python -m investment.jobs.apply_decision
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          VAPID_PRIVATE_KEY: ${{ secrets.VAPID_PRIVATE_KEY }}
+          VAPID_SUBJECT: ${{ secrets.VAPID_SUBJECT }}
           PYTHONPATH: src
 
       # AIが書いたものを、git とは別の場所にも残す。

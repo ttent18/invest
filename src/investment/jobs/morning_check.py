@@ -18,6 +18,7 @@ from zoneinfo import ZoneInfo
 from investment.config import bucket_by_name
 from investment.db import connect, record_gap, select_positions
 from investment.market import MarketDataError, fetch_range
+from investment.notify import send as notify_send
 
 JST = ZoneInfo("Asia/Tokyo")  # 「今日」は日本時間で決める（GitHub Actions は UTC で動くため）
 
@@ -223,6 +224,33 @@ def main() -> int:
     lines, code = summarize_result(len(positions), hits, failed, attempted, expired)
     for line in lines:
         print(line)
+
+    # 到達の可能性・期限切れ・「1件も確認できなかった」のいずれかがあるときだけ
+    # 通知する。何も起きていない朝に通知すると、通知そのものが意味を失う。
+    #
+    # 「1件も確認できなかった」も通知が要る。値動きが1件も取れなかった朝は
+    # hits も expired も両方空になり、以前はここで通知しないまま終わっていた。
+    # しかし「確認できていない」朝こそ、利用者が自分でSBI（証券会社）を
+    # 見にいく必要がある朝であり、通知が届かないと本人はそれに気づけない。
+    all_failed = attempted > 0 and failed == attempted
+    if hits or expired or all_failed:
+        # ロック画面ではこの文面が全文になる。「約定」は初心者には分からない
+        # 言葉（注文が成立すること）なので使わない。タイトルだけでも
+        # 「何を確認すればいいか」が伝わるようにする。
+        parts = []
+        if hits:
+            parts.append(f"{len(hits)} 件が売れた可能性")
+        if expired:
+            parts.append(f"{len(expired)} 件が期限切れ")
+        if all_failed:
+            parts.append("株価が確認できませんでした。自分でSBIを見てください")
+        with connect() as conn:
+            notify_send(
+                conn,
+                title="SBIで持ち株を確認してください",
+                body=" ／ ".join(parts),
+                url="/holdings",
+            )
     return code
 
 

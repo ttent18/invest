@@ -21,9 +21,13 @@
 from dataclasses import dataclass
 
 
+# initial_capital は「最初に入金する額」であって、運用中の総資金ではない。
+# 運用中の総資金は db.select_capital() が現金と保有から計算する。
+# 以前はここに total_capital という名前で直書きしており、利確して資金が
+# 増えても仕組みが気づけなかった（2026-09-07 に判明）。
 @dataclass(frozen=True)
 class Settings:
-    total_capital: int          # 総資金（円）
+    initial_capital: int        # 最初に入金する額（円）。運用中の総資金はDBから計算する
     max_position_pct: float     # 1銘柄に投じる上限（資金に対する比率）
     risk_per_trade_pct: float   # 1取引で許容する損失（資金に対する比率）
     jp_fee_rate: float          # 日本株の往復手数料率
@@ -57,7 +61,7 @@ class ScreenCriteria:
 
 
 SETTINGS = Settings(
-    total_capital=550_000,
+    initial_capital=550_000,
     max_position_pct=0.25,
     risk_per_trade_pct=0.02,
     jp_fee_rate=0.0,
