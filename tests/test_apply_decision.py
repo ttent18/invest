@@ -1007,3 +1007,43 @@ def test_process_records_a_gap_when_the_journal_is_missing(tmp_path):
     assert (accepted, rejected) == (1, 0)   # 判断そのものは保存する
     gap.assert_called_once()
     assert gap.call_args.kwargs["scope"] == "journal:missing"
+
+
+def test_journal_check_detects_a_stale_journal_from_an_earlier_run(tmp_path):
+    """今回書かれていない日誌を見抜くこと。
+
+    2026-09-07 に、AIが日誌を書かないまま終わったのに検知が素通りした。
+    同じ日の前の実行で書かれた日誌に、たまたま同じ銘柄が載っていたため。
+    「銘柄名が書いてあるか」ではなく「今回書かれたか」を見る必要がある。
+    """
+    import os
+
+    from investment.jobs.apply_decision import check_journal_covers
+
+    journal = tmp_path / "j.md"
+    journal.write_text("156A.T について（前回の実行で書いたもの）", encoding="utf-8")
+    before = tmp_path / "context.json"
+    before.write_text("{}", encoding="utf-8")
+    # 基準ファイルのほうが新しい ＝ 日誌は今回書かれていない
+    os.utime(journal, (1000, 1000))
+    os.utime(before, (2000, 2000))
+
+    gap = check_journal_covers(journal, [{"symbol": "156A.T"}], written_after=before)
+    assert gap is not None
+    assert gap[0] == "journal:stale"
+    assert "前の実行" in gap[1] or "今回" in gap[1]
+
+
+def test_journal_check_passes_when_the_journal_was_written_this_run(tmp_path):
+    import os
+
+    from investment.jobs.apply_decision import check_journal_covers
+
+    journal = tmp_path / "j.md"
+    journal.write_text("156A.T について", encoding="utf-8")
+    before = tmp_path / "context.json"
+    before.write_text("{}", encoding="utf-8")
+    os.utime(before, (1000, 1000))
+    os.utime(journal, (2000, 2000))   # 日誌のほうが新しい
+
+    assert check_journal_covers(journal, [{"symbol": "156A.T"}], written_after=before) is None

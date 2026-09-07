@@ -31,6 +31,14 @@ VALID_ACTION = {"buy", "sell"}
 # 目安として選んだ値。
 ENTRY_PRICE_TOLERANCE = 0.10
 
+DECISION_PATH = Path("build/decision.json")
+
+# 日誌が「今回の実行で書かれたか」を判定する基準。
+# context.json は AI が動き出す前に必ず作られるので、AI が書いたファイルは
+# 必ずこれより新しくなる。判断ファイルと比べる形にすると、書く順序を変えた
+# だけで判定が壊れるため、こちらを基準にする。
+CONTEXT_PATH = Path("build/context.json")
+
 # 利確・損切りの値が、枠の決めた幅と一致しているとみなす許容誤差。
 #
 # 例: 899円 × 1.22 = 1096.78円 のように端数が出るため、1円単位に丸めた値も
@@ -455,7 +463,9 @@ def process(
         record_no_proposals(conn, ctx, decisions)
 
     # 日誌が書かれたかを確かめる。判断だけ残って理由が残らないのを防ぐ。
-    journal_gap = check_journal_covers(Path(journal_path), accepted)
+    journal_gap = check_journal_covers(
+        Path(journal_path), accepted, written_after=CONTEXT_PATH
+    )
     if journal_gap is not None:
         print(f"注意: {journal_gap[1]}")
         record_gap(conn, scope=journal_gap[0], detail=journal_gap[1])
@@ -464,13 +474,23 @@ def process(
     return len(accepted), len(rejected)
 
 
-def check_journal_covers(path: Path, accepted: list[dict]) -> tuple[str, str] | None:
-    """採用した銘柄が日誌に書かれているかを見る。書かれていなければ記録を返す。
+def check_journal_covers(
+    path: Path, accepted: list[dict], written_after: Path | None = None
+) -> tuple[str, str] | None:
+    """今回の実行で日誌が書かれたかを見る。書かれていなければ記録を返す。
 
     2026-09-07 に、AIが decision.json は書いたのに日誌を書かないまま
     「成功」で終わった。判断は残るが「なぜそう判断したか」が残らない。
     この仕組みは判断そのものより、判断の理由と振り返りが溜まることに
     価値があるので、書かれていない事実を見逃さない。
+
+    見るのは2つ。
+
+    1. 日誌が written_after（AIが動く前に作られるファイル）より新しいか
+       （＝今回書かれたか）。同じ日に2回目を実行すると、前の実行で書いた
+       日誌が既にある。中身だけ見ていると、たまたま同じ銘柄が載っていて
+       素通りする（実際に2回素通りした）。
+    2. 採用した銘柄が日誌に出てくるか。
 
     判断そのものは正しいので却下はしない。data_gaps に残すだけにする。
     """
@@ -482,6 +502,20 @@ def check_journal_covers(path: Path, accepted: list[dict]) -> tuple[str, str] | 
             "（判断は保存しましたが、その理由と振り返りが残っていません）"
         )
         return ("journal:missing", detail)
+
+    # 判断ファイルより日誌が古ければ、今回は書かれていない。
+    stale = (
+        written_after is not None
+        and written_after.exists()
+        and path.stat().st_mtime < written_after.stat().st_mtime
+    )
+    if stale:
+        detail = (
+            f"日誌 {path} が今回の実行で更新されていません"
+            f"（前の実行で書かれたものが残っているだけ）。"
+            f"採用した {len(accepted)} 件の理由と振り返りが残っていません"
+        )
+        return ("journal:stale", detail)
 
     text = path.read_text(encoding="utf-8")
     missing = [d["symbol"] for d in accepted if d["symbol"] not in text]
@@ -522,7 +556,7 @@ def load_decision(path: Path) -> tuple[list[dict], str, tuple[str, str] | None]:
 
 def main() -> int:
     ctx = json.loads(Path("build/context.json").read_text(encoding="utf-8"))
-    decisions, journal_path, missing = load_decision(Path("build/decision.json"))
+    decisions, journal_path, missing = load_decision(DECISION_PATH)
 
     with connect() as conn:
         if missing is not None:
