@@ -99,14 +99,27 @@ def select_screened(conn, criteria: ScreenCriteria, limit: int) -> list[dict]:
         return list(cur.fetchall())
 
 
-def record_gap(conn, scope: str, detail: str) -> None:
-    """データが取れなかった事実を残す。取れたことにしない。"""
+def record_gaps(conn, gaps: list[tuple[str, str]]) -> int:
+    """データが取れなかった事実をまとめて残す。取れたことにしない。
+
+    gaps は (scope, detail) の組のリスト。何千件になっても書き込みは1回で
+    済ませる。1件ずつ接続を往復させると、件数が多いときに時間がかかり、
+    その間に Neon 側から接続を切られる恐れがあるため。
+    """
+    if not gaps:
+        return 0
     with conn.cursor() as cur:
-        cur.execute(
+        cur.executemany(
             "INSERT INTO data_gaps (occurred_at, scope, detail) VALUES (NOW(), %s, %s)",
-            (scope, detail),
+            gaps,
         )
     conn.commit()
+    return len(gaps)
+
+
+def record_gap(conn, scope: str, detail: str) -> None:
+    """データが取れなかった事実を1件残す。取れたことにしない。"""
+    record_gaps(conn, [(scope, detail)])
 
 
 def select_positions(conn) -> list[dict]:

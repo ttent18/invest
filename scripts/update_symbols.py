@@ -54,6 +54,19 @@ INCLUDED_MARKET_SEGMENTS = (
     "グロース（内国株式）",
 )
 
+# 普通株式の銘柄コードの文字数。
+#
+# 日本株の銘柄コードは4文字（例: 7203、130A）。5文字のコードは
+# 優先株式・種類株式で、普通株式とは別物である。
+# 例: 25935 = 伊藤園第1種優先株式、50765 = インフロニアHD 第1回社債型種類株式。
+#
+# これらは JPX の一覧では「プライム（内国株式）」に分類されているため
+# 市場区分では除けないが、
+# - 会社そのものを買うものではなく、この仕組みが想定している投資対象ではない
+# - 株価データの提供元(yfinance)にデータが無く、取得すると必ず失敗する
+# ため、文字数で除外する。
+COMMON_STOCK_CODE_LENGTH = 4
+
 
 def download(url: str = JPX_URL) -> bytes:
     """JPXのxlsxをダウンロードする。"""
@@ -75,14 +88,18 @@ def _format_code(value: object) -> str:
 
 
 def extract_domestic_codes(df: pd.DataFrame) -> list[str]:
-    """内国株式3市場(プライム/スタンダード/グロース)の銘柄コードだけを抜き出す。
+    """内国株式3市場(プライム/スタンダード/グロース)の普通株式だけを抜き出す。
+
+    市場区分で絞ったうえで、コードが4文字のもの(普通株式)だけを残す。
+    5文字のコードは優先株式・種類株式なので除く(COMMON_STOCK_CODE_LENGTH 参照)。
 
     ネットワークに依存させないため、xlsx を読み込んだ後の DataFrame を
     受け取る形にしてある。ダウンロード処理そのもの (download()) はここでは
     テストしない。
     """
     filtered = df[df[MARKET_COLUMN].isin(INCLUDED_MARKET_SEGMENTS)]
-    return [_format_code(v) for v in filtered[CODE_COLUMN].tolist()]
+    codes = [_format_code(v) for v in filtered[CODE_COLUMN].tolist()]
+    return [c for c in codes if len(c) == COMMON_STOCK_CODE_LENGTH]
 
 
 def build_symbols_file(df: pd.DataFrame, source_date: str, generated_at: datetime) -> str:
@@ -98,8 +115,9 @@ def build_symbols_file(df: pd.DataFrame, source_date: str, generated_at: datetim
         f"# 元データの日付: {source_date}",
         f"# 件数: {len(codes)}",
         "#",
-        "# 対象: 内国株式のプライム・スタンダード・グロース市場のみ",
+        "# 対象: 内国株式のプライム・スタンダード・グロース市場の普通株式のみ",
         "#   (ETF・ETN、REIT等、PRO Market、外国株式、出資証券は除外)",
+        "#   (5文字コードの優先株式・種類株式も除外)",
         "#",
         "# 更新方法: uv run python scripts/update_symbols.py",
         "# (JPXのファイルは月次更新。更新のたびに再実行してコミットすること)",

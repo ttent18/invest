@@ -127,3 +127,20 @@ def test_build_symbols_file_header_mentions_url_date_and_count():
     assert "20260831" in text
     assert "1" in text  # 件数
     assert "2026-09-07" in text  # 生成日時
+
+
+def test_extract_domestic_codes_excludes_five_character_preferred_shares():
+    """5文字のコードは優先株式・種類株式なので除外する。
+
+    JPXの一覧では「プライム（内国株式）」に含まれているが、普通株式ではない。
+    例: 25935 = 伊藤園第1種優先株式、50765 = インフロニアHD 第1回社債型種類株式。
+    株価データの提供元(yfinance)にもデータが無く、取得すると必ず失敗する。
+    """
+    df = _df(
+        [
+            _row(25935, "プライム（内国株式）"),
+            _row(50765, "プライム（内国株式）"),
+            _row(1301, "プライム（内国株式）"),
+        ]
+    )
+    assert extract_domestic_codes(df) == ["1301"]
