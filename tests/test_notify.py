@@ -49,7 +49,7 @@ def test_send_removes_a_device_that_no_longer_exists():
         patch("investment.notify.WebPushException", FakeWebPushException),
         patch("investment.notify.webpush", side_effect=fake_push),
         patch("investment.notify.delete_push_subscription") as delete,
-        patch("investment.notify.record_gap"),
+        patch("investment.notify.record_gap") as gap,
         patch("investment.notify.VAPID_PRIVATE_KEY", "dummy"),
         patch("investment.notify.VAPID_SUBJECT", "mailto:test@example.com"),
     ):
@@ -58,6 +58,7 @@ def test_send_removes_a_device_that_no_longer_exists():
     assert (ok, failed) == (1, 1)
     delete.assert_called_once()
     assert delete.call_args.args[1] == "https://push.test/a"
+    gap.assert_not_called()
 
 
 def test_send_records_a_failure_that_is_not_an_expired_device():

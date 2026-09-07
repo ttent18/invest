@@ -8,11 +8,13 @@ from investment.config import SCREEN
 from investment.db import (
     apply_migrations,
     connect,
+    delete_push_subscription,
     mark_fill_failed,
     record_gap,
     record_gaps,
     select_bucket_performance,
     select_capital,
+    select_push_subscriptions,
     select_screened,
     select_unapplied_fills,
     upsert_fundamentals,
@@ -304,6 +306,67 @@ def test_push_subscriptions_are_unique_per_endpoint(conn):
         cur.execute("SELECT COUNT(*) AS c FROM push_subscriptions")
         assert cur.fetchone()["c"] == 1
     conn.commit()
+
+
+def test_select_push_subscriptions_returns_the_registered_devices(conn):
+    """登録した宛先が、そのままの内容で読み出せること。
+
+    ここでモックを使ってしまうと、通知の宛先が実は取れていなくても
+    テストが気づけない。実際のテーブルに対して SQL を走らせて確認する。
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO push_subscriptions (endpoint, p256dh, auth)
+            VALUES ('https://push.test/x', 'key-x', 'auth-x')
+            """
+        )
+    conn.commit()
+
+    rows = select_push_subscriptions(conn)
+
+    assert rows == [
+        {"endpoint": "https://push.test/x", "p256dh": "key-x", "auth": "auth-x"}
+    ]
+
+
+def test_select_push_subscriptions_with_none_registered_is_an_empty_list(conn):
+    assert select_push_subscriptions(conn) == []
+
+
+def test_delete_push_subscription_removes_only_the_given_endpoint(conn):
+    """指定した宛先だけが消え、他の宛先は残ること。"""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO push_subscriptions (endpoint, p256dh, auth)
+            VALUES ('https://push.test/keep', 'k1', 'a1'),
+                   ('https://push.test/remove', 'k2', 'a2')
+            """
+        )
+    conn.commit()
+
+    delete_push_subscription(conn, "https://push.test/remove")
+
+    remaining = select_push_subscriptions(conn)
+    assert [r["endpoint"] for r in remaining] == ["https://push.test/keep"]
+
+
+def test_delete_push_subscription_does_nothing_for_an_unknown_endpoint(conn):
+    """存在しない宛先を指定しても例外にならず、既存の行はそのまま残ること。"""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO push_subscriptions (endpoint, p256dh, auth)
+            VALUES ('https://push.test/keep', 'k1', 'a1')
+            """
+        )
+    conn.commit()
+
+    delete_push_subscription(conn, "https://push.test/does-not-exist")
+
+    remaining = select_push_subscriptions(conn)
+    assert [r["endpoint"] for r in remaining] == ["https://push.test/keep"]
 
 
 def test_select_unapplied_fills_returns_only_the_ones_not_yet_applied(conn):
