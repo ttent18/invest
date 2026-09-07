@@ -2,6 +2,7 @@
 
 import math
 from dataclasses import dataclass
+from datetime import date, timedelta
 
 import yfinance as yf
 
@@ -125,3 +126,17 @@ def fetch_last_price(code: str) -> float:
     if price is None or price <= 0:
         raise MarketDataError(f"{symbol} の株価が取得できませんでした")
     return price
+
+
+def fetch_daily_range(symbol: str, day: date) -> tuple[float, float]:
+    """指定日の高値と安値を返す。取れなければ MarketDataError。"""
+    try:
+        hist = yf.Ticker(symbol).history(
+            start=day.isoformat(), end=(day + timedelta(days=1)).isoformat()
+        )
+    except Exception as exc:
+        raise MarketDataError(f"{symbol} の {day} の値動きを取得できません") from exc
+
+    if hist.empty:
+        raise MarketDataError(f"{symbol} の {day} のデータがありません")
+    return float(hist["High"].iloc[0]), float(hist["Low"].iloc[0])
