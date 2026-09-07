@@ -582,3 +582,55 @@ def test_accepts_selling_the_entire_holding_even_if_it_is_not_a_whole_lot():
     """
     ctx = dict(CTX, positions=[{"symbol": "3993.T", "quantity": 37}])
     assert validate(good_sell(quantity=37), ctx, SETTINGS) == []
+
+
+# --- AIの判断ファイルが無い場合 ---------------------------------------------
+# 2026-09-07 の3回目の実行で、AIは判断も日誌も完成させたのに、
+# 「使ったターン数が設定の上限を超えた」という理由でステップが失敗扱いになり、
+# その結果 保存ステップ自体が実行されず、完成していた判断が捨てられた。
+# 保存ステップは常に実行するように変更したため、判断ファイルが本当に無い
+# ケース（AIが途中で止まった場合）を、例外ではなく記録として扱う必要がある。
+
+
+def test_load_decision_records_a_gap_when_the_file_is_missing(tmp_path):
+    """判断ファイルが無い場合、例外ではなく「無かった」という記録を返すこと。"""
+    from investment.jobs.apply_decision import load_decision
+
+    decisions, journal_path, missing = load_decision(tmp_path / "decision.json")
+
+    assert missing is not None
+    assert missing[0] == "decision:missing"          # data_gaps に残す分類
+    assert "decision.json" in missing[1]             # 人が読む説明
+    assert decisions == []
+    assert journal_path == ""
+
+
+def test_load_decision_records_a_gap_when_the_file_is_broken(tmp_path):
+    """壊れたJSONも、例外ではなく記録として扱うこと。
+
+    AIが途中で止まると、書きかけのJSONが残ることがある。
+    """
+    from investment.jobs.apply_decision import load_decision
+
+    p = tmp_path / "decision.json"
+    p.write_text('{"decisions": [', encoding="utf-8")
+    decisions, _, missing = load_decision(p)
+
+    assert missing is not None
+    assert decisions == []
+
+
+def test_load_decision_reads_a_valid_file(tmp_path):
+    """正常なファイルはそのまま読める。"""
+    from investment.jobs.apply_decision import load_decision
+
+    p = tmp_path / "decision.json"
+    p.write_text(
+        '{"journal_path": "journal/2026-09-07.md", "decisions": [{"symbol": "3993.T"}]}',
+        encoding="utf-8",
+    )
+    decisions, journal_path, missing = load_decision(p)
+
+    assert missing is None
+    assert decisions == [{"symbol": "3993.T"}]
+    assert journal_path == "journal/2026-09-07.md"

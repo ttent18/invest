@@ -10,7 +10,9 @@ concurrency:
 jobs:
   analyze:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # 候補22件を1銘柄ずつWebSearchで調べると、AIのステップだけで約18分かかる。
+    # 候補が増えれば伸びるため、余裕を持たせてある。
+    timeout-minutes: 60
     permissions:
       contents: write
       id-token: write
@@ -39,10 +41,27 @@ jobs:
           prompt: "/analyze"
           claude_args: |
             --model claude-opus-5
-            --max-turns 30
-            --allowedTools "Read,Write,WebSearch,WebFetch"
+            --max-turns 150
+            --allowedTools "Read,Glob,Write,WebSearch,WebFetch"
+        # --max-turns について:
+        #   候補1件あたり数ターン(検索→記事を読む→数字を確認)かかるため、
+        #   必要なターン数は候補数に比例する。候補22件のときは74ターン使った。
+        #   30では足りず、判断も日誌も完成していたのにステップが失敗扱いになり、
+        #   次の保存ステップが飛ばされて判断が捨てられた(2026-09-07)。
+        #   実質的な歯止めは上の timeout-minutes なので、ここは余裕を持たせる。
+        #
+        # Glob を許可している理由:
+        #   手順3で journal/ の直近5営業日のファイルを読ませているが、
+        #   どのファイルがあるかを調べる手段が無いと読めない。
+        #   Bash は許可しない(何でもできてしまうため)。
 
       - name: 判断を検証して保存する
+        # 前のステップ(Claude が判断する)が失敗しても、このステップは実行する。
+        # 2026-09-07 に、AIは判断も日誌も完成させたのに「使ったターン数が上限を
+        # 超えた」という理由だけでステップが失敗扱いになり、完成していた判断が
+        # 保存されずに捨てられた。判断ファイルが本当に無い場合は、
+        # apply_decision が data_gaps に記録して終了する(例外は投げない)。
+        if: always()
         run: uv run python -m investment.jobs.apply_decision
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}

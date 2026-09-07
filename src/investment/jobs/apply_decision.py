@@ -334,13 +334,41 @@ def process(
     return len(accepted), len(rejected)
 
 
+def load_decision(path: Path) -> tuple[list[dict], str, tuple[str, str] | None]:
+    """AIの判断ファイルを読む。戻り値は (判断のリスト, journalのパス, 読めなかった記録)。
+
+    読めなかった場合に例外を投げないのは、保存の処理を「AIのステップが
+    失敗しても必ず実行する」形にしたため。AIが途中で止まればファイルは
+    無いか壊れているが、それは異常終了ではなく「今日は判断が出なかった」
+    という記録すべき事実である。3番目の戻り値は data_gaps に残すための
+    (scope, detail) で、正常に読めた場合は None。
+    """
+    if not path.exists():
+        detail = (
+            f"AIの判断ファイル {path} が作られませんでした"
+            "（AIのステップが判断を書き終える前に終了した可能性があります）"
+        )
+        return [], "", ("decision:missing", detail)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        detail = (
+            f"AIの判断ファイル {path} が壊れていて読めませんでした: {exc}"
+            "（AIが書き終える前に終了した可能性があります）"
+        )
+        return [], "", ("decision:broken", detail)
+    return raw.get("decisions", []), raw.get("journal_path", ""), None
+
+
 def main() -> int:
     ctx = json.loads(Path("build/context.json").read_text(encoding="utf-8"))
-    raw = json.loads(Path("build/decision.json").read_text(encoding="utf-8"))
-    decisions = raw.get("decisions", [])
-    journal_path = raw.get("journal_path", "")
+    decisions, journal_path, missing = load_decision(Path("build/decision.json"))
 
     with connect() as conn:
+        if missing is not None:
+            record_gap(conn, scope=missing[0], detail=missing[1])
+            print(missing[1])
+            return 1
         process(conn, ctx, decisions, journal_path, SETTINGS)
 
     return 0
