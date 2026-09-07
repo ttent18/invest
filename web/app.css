@@ -1,0 +1,522 @@
+/* 3つの画面（今日やること／保有／収支）で共通のスタイル。
+   フレームワークなし。CDNからの読み込みなし。iPhone（幅375px〜）を基準に作る。 */
+
+:root {
+  --bg: #0f1115;
+  --surface: #171a21;
+  --surface-2: #1f232c;
+  --border: #2b303b;
+  --text: #eef0f3;
+  --muted: #97a0ad;
+  --accent: #4f8cff;
+  --danger: #ff5252;
+  --danger-bg: #3a1414;
+  --danger-border: #6b1f1f;
+  --profit: #35c46b;
+  --warn: #e8a33d;
+  --warn-bg: #3a2c10;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Hiragino Kaku Gothic ProN", sans-serif;
+  font-size: 16px;
+  line-height: 1.55;
+  padding-bottom: calc(24px + env(safe-area-inset-bottom));
+  -webkit-text-size-adjust: 100%;
+}
+
+.app-container {
+  max-width: 480px;
+  margin: 0 auto;
+  padding: 12px 16px calc(16px + env(safe-area-inset-bottom));
+  padding-top: calc(12px + env(safe-area-inset-top));
+}
+
+h1,
+h2,
+h3 {
+  margin: 0 0 8px;
+}
+
+h1 {
+  font-size: 20px;
+}
+
+h2 {
+  font-size: 16px;
+  color: var(--muted);
+  font-weight: 600;
+  margin-top: 24px;
+}
+
+p {
+  margin: 4px 0;
+}
+
+a {
+  color: var(--accent);
+}
+
+/* ------------------------------------------------------------------ */
+/* 上部の行き来 */
+/* ------------------------------------------------------------------ */
+
+.app-nav {
+  display: flex;
+  gap: 4px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 4px;
+  margin-bottom: 12px;
+}
+
+.app-nav-link {
+  flex: 1;
+  text-align: center;
+  padding: 10px 4px;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9px;
+  text-decoration: none;
+  color: var(--muted);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.app-nav-link-active {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+/* ------------------------------------------------------------------ */
+/* 帯（banner） */
+/* ------------------------------------------------------------------ */
+
+.banner {
+  border-radius: 10px;
+  padding: 12px 14px;
+  margin-bottom: 12px;
+  font-size: 15px;
+  font-weight: 600;
+  white-space: pre-line;
+}
+
+.banner-danger {
+  background: var(--danger-bg);
+  border: 1px solid var(--danger-border);
+  color: #ffb3b3;
+}
+
+.banner-info {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.unapplied-list {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  font-weight: 400;
+}
+
+.unapplied-list li {
+  margin-bottom: 4px;
+}
+
+/* ------------------------------------------------------------------ */
+/* カード共通 */
+/* ------------------------------------------------------------------ */
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 14px;
+  margin-bottom: 12px;
+}
+
+.card-danger {
+  border-color: var(--danger-border);
+  background: var(--danger-bg);
+}
+
+.empty-state {
+  color: var(--muted);
+  text-align: center;
+  padding: 24px 8px;
+}
+
+.loading-state {
+  color: var(--muted);
+  text-align: center;
+  padding: 24px 8px;
+}
+
+/* ------------------------------------------------------------------ */
+/* 提案カード */
+/* ------------------------------------------------------------------ */
+
+.proposal-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.proposal-symbol {
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.proposal-bucket {
+  display: inline-block;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 10px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.proposal-side {
+  display: inline-block;
+  border-radius: 999px;
+  padding: 2px 10px;
+  font-size: 13px;
+  font-weight: 700;
+  margin-right: 6px;
+}
+
+.proposal-side-buy {
+  background: #14321f;
+  color: var(--profit);
+}
+
+.proposal-side-sell {
+  background: var(--warn-bg);
+  color: var(--warn);
+}
+
+.days-old {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.days-old-warn {
+  color: var(--warn);
+  font-weight: 700;
+}
+
+/* 損切り価格：この画面でいちばん目立たせる要素 */
+.stop-loss-block {
+  margin-top: 12px;
+  padding: 12px;
+  background: var(--danger-bg);
+  border: 2px solid var(--danger);
+  border-radius: 12px;
+}
+
+.stop-loss-label {
+  font-size: 13px;
+  color: #ffb3b3;
+  font-weight: 700;
+}
+
+.stop-loss-value {
+  font-size: 30px;
+  font-weight: 800;
+  color: var(--danger);
+  line-height: 1.2;
+}
+
+.stop-loss-note {
+  font-size: 13px;
+  color: #ffb3b3;
+  margin-top: 2px;
+}
+
+.proposal-figures {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.figure {
+  background: var(--surface-2);
+  border-radius: 10px;
+  padding: 8px 10px;
+}
+
+.figure-label {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.figure-value {
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.figure-value-profit {
+  color: var(--profit);
+}
+
+.rationale {
+  margin-top: 12px;
+  font-size: 14px;
+}
+
+.rationale summary {
+  cursor: pointer;
+  color: var(--accent);
+  font-weight: 600;
+  list-style: none;
+}
+
+.rationale summary::-webkit-details-marker {
+  display: none;
+}
+
+.rationale p {
+  margin-top: 6px;
+  color: var(--text);
+  white-space: pre-wrap;
+}
+
+.proposal-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+/* ------------------------------------------------------------------ */
+/* ボタン */
+/* ------------------------------------------------------------------ */
+
+button,
+.btn {
+  font-family: inherit;
+  font-size: 16px;
+  min-height: 44px;
+  border-radius: 10px;
+  border: none;
+  padding: 10px 14px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: #ffffff;
+  flex: 1;
+}
+
+.btn-sell {
+  background: var(--warn);
+  color: #241a00;
+  flex: 1;
+}
+
+.btn-secondary {
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  flex: 1;
+}
+
+.btn-block {
+  width: 100%;
+}
+
+.btn-danger-confirm {
+  background: var(--danger);
+  color: #ffffff;
+}
+
+button:disabled,
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* ------------------------------------------------------------------ */
+/* 枠・現金・総資金 */
+/* ------------------------------------------------------------------ */
+
+.bucket-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.bucket-row:last-child {
+  border-bottom: none;
+}
+
+.bucket-name {
+  font-weight: 700;
+}
+
+.bucket-slots {
+  color: var(--muted);
+  font-size: 14px;
+  text-align: right;
+}
+
+.money-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 6px 0;
+}
+
+.money-label {
+  color: var(--muted);
+}
+
+.money-value {
+  font-weight: 700;
+}
+
+/* ------------------------------------------------------------------ */
+/* モーダル（買った／売った／見送る） */
+/* ------------------------------------------------------------------ */
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: flex-end;
+  z-index: 50;
+}
+
+.modal-sheet {
+  background: var(--surface);
+  border-radius: 16px 16px 0 0;
+  padding: 16px 16px calc(16px + env(safe-area-inset-bottom));
+  width: 100%;
+  max-height: 88vh;
+  overflow-y: auto;
+  border-top: 1px solid var(--border);
+}
+
+.modal-title {
+  font-size: 17px;
+  font-weight: 700;
+  margin-bottom: 4px;
+}
+
+.modal-subtitle {
+  color: var(--muted);
+  font-size: 14px;
+  margin-bottom: 12px;
+}
+
+.form-row {
+  margin-bottom: 12px;
+}
+
+.form-row label {
+  display: block;
+  font-size: 13px;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+
+.form-row input,
+.form-row textarea {
+  width: 100%;
+  font-size: 16px;
+  padding: 10px 12px;
+  min-height: 44px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.form-row textarea {
+  min-height: 72px;
+  resize: vertical;
+}
+
+.form-row-static {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-weight: 700;
+}
+
+/* SBIの予約注文（逆指値）確認チェック：飛ばせないようにする最重要要素 */
+.confirm-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  background: var(--danger-bg);
+  border: 2px solid var(--danger);
+  border-radius: 12px;
+  padding: 12px;
+  margin: 16px 0;
+}
+
+.confirm-row input[type="checkbox"] {
+  width: 24px;
+  height: 24px;
+  min-height: 0;
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.confirm-row label {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.confirm-row strong {
+  color: var(--danger);
+}
+
+.error-text {
+  color: var(--danger);
+  font-size: 14px;
+  white-space: pre-line;
+  margin: 8px 0;
+}
+
+.modal-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.hint-text {
+  color: var(--muted);
+  font-size: 13px;
+  margin: -6px 0 12px;
+}
+
+[hidden] {
+  display: none !important;
+}

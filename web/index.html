@@ -1,0 +1,544 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#0f1115" />
+    <title>今日やること</title>
+    <link rel="stylesheet" href="/app.css" />
+  </head>
+  <body>
+    <noscript>
+      この画面を使うにはJavaScriptが必要です。iPhoneの「設定」からJavaScriptを有効にしてください。
+    </noscript>
+
+    <div class="app-container">
+      <div id="nav-root"></div>
+      <h1>今日やること</h1>
+      <div id="banner-root"></div>
+      <main id="main-root">
+        <div class="loading-state">読み込んでいます…</div>
+      </main>
+    </div>
+
+    <div id="modal-root"></div>
+    <div id="toast-root"></div>
+
+    <script type="module">
+      import {
+        loadState,
+        postFill,
+        postSkip,
+        postAnalyze,
+        yen,
+        pct,
+        whenText,
+        toDatetimeLocalValue,
+        escapeHtml,
+        banner,
+        renderNav,
+      } from "/app.js";
+
+      // ---------------------------------------------------------------
+      // 帯（一時的なお知らせ）
+      // ---------------------------------------------------------------
+
+      // banner-root は state を読み直すたびに中身を作り直す（refresh で
+      // 消える）。一時的なお知らせ（記録しました、など）は別の
+      // toast-root に出す。ここは refresh で消さないので、
+      // 出したメッセージが refresh の巻き添えで一瞬で消えることが無い。
+      function showTransientMessage(text, kind) {
+        const root = document.getElementById("toast-root");
+        const el = banner(kind || "info", text);
+        el.style.position = "fixed";
+        el.style.left = "16px";
+        el.style.right = "16px";
+        el.style.bottom = "calc(16px + env(safe-area-inset-bottom))";
+        el.style.zIndex = "100";
+        root.appendChild(el);
+        setTimeout(() => {
+          el.remove();
+        }, 4500);
+      }
+
+      // ---------------------------------------------------------------
+      // モーダルの開閉
+      // ---------------------------------------------------------------
+
+      function closeModal() {
+        document.getElementById("modal-root").innerHTML = "";
+      }
+
+      // 「買った」「売った」の入力欄。
+      //
+      // proposal.action が "sell" のときは「売った」の入力欄になる。
+      // 損切りの予約注文の確認チェックは、新しく買うとき（safety net を
+      // 新しく仕掛けるとき）だけ必要なので、買いのときだけ出す。
+      function openFillModal(proposal) {
+        document.getElementById("modal-root").innerHTML = "";
+        const isBuy = proposal.action === "buy";
+        const now = new Date();
+        // 送信が失敗して再送するとき、同じ鍵を使い回す（二重記録を防ぐため）。
+        let clientKey = null;
+
+        const overlay = document.createElement("div");
+        overlay.className = "modal-overlay";
+        overlay.innerHTML = `
+          <div class="modal-sheet">
+            <div class="modal-title">${isBuy ? "買った" : "売った"}を記録する</div>
+            <div class="modal-subtitle">${escapeHtml(proposal.symbol)} ・ ${escapeHtml(proposal.bucket)}枠</div>
+
+            <div class="form-row">
+              <label>銘柄コード</label>
+              <div class="form-row-static">${escapeHtml(proposal.symbol)}</div>
+            </div>
+            <div class="form-row">
+              <label>枠</label>
+              <div class="form-row-static">${escapeHtml(proposal.bucket)}枠</div>
+            </div>
+            <div class="form-row">
+              <label>株数</label>
+              <input type="number" inputmode="numeric" id="fm-quantity" min="1" step="1"
+                value="${proposal.quantity ?? ""}">
+            </div>
+            <div class="form-row">
+              <label>${isBuy ? "買った値段（1株あたり）" : "売った値段（1株あたり）"}</label>
+              <input type="number" inputmode="decimal" id="fm-price" min="0" step="0.01"
+                placeholder="${isBuy ? "" : "例：950"}"
+                value="${isBuy && proposal.entry_price != null ? proposal.entry_price : ""}">
+              <p class="hint-text">SBIで実際に約定した値段をそのまま入れてください（提案の値段とずれていて構いません）。</p>
+              ${
+                !isBuy
+                  ? `<p class="hint-text">参考：利確の目安 ${yen(proposal.take_profit)} ／ 損切りの目安 ${yen(proposal.stop_loss)}</p>`
+                  : ""
+              }
+            </div>
+            <div class="form-row">
+              <label>売買した日時</label>
+              <input type="datetime-local" id="fm-traded-at" value="${toDatetimeLocalValue(now)}">
+            </div>
+            <div class="form-row">
+              <label>手数料（円）</label>
+              <input type="number" inputmode="numeric" id="fm-fee" min="0" step="1" value="0">
+            </div>
+
+            ${
+              isBuy
+                ? `
+            <div class="confirm-row">
+              <input type="checkbox" id="fm-confirm">
+              <label for="fm-confirm">SBIで損切りの予約注文（<strong>${yen(
+                proposal.stop_loss
+              )}</strong> まで値下がりしたら自動で売る注文。SBIでは「逆指値」と呼びます）を、もう入れましたか。<br>
+                <strong>これを入れ忘れると、値下がりしたときに自動で損を止める仕組みが働きません。</strong></label>
+            </div>`
+                : ""
+            }
+
+            <div class="error-text" id="fm-error" hidden></div>
+
+            <div class="modal-actions">
+              <button class="btn btn-secondary" id="fm-cancel" type="button">やめる</button>
+              <button class="btn ${isBuy ? "btn-primary" : "btn-sell"}" id="fm-submit" type="button">
+                この内容で記録する
+              </button>
+            </div>
+          </div>
+        `;
+        document.getElementById("modal-root").appendChild(overlay);
+
+        const submitBtn = overlay.querySelector("#fm-submit");
+        const cancelBtn = overlay.querySelector("#fm-cancel");
+        const errorEl = overlay.querySelector("#fm-error");
+        const checkbox = overlay.querySelector("#fm-confirm");
+
+        if (isBuy) {
+          // 確認チェックを入れるまで、確定ボタンを押せないようにする。
+          // これを飛ばせるようにしないこと（安全装置の入れ忘れ防止のため）。
+          submitBtn.disabled = true;
+          checkbox.addEventListener("change", () => {
+            submitBtn.disabled = !checkbox.checked;
+          });
+        }
+
+        cancelBtn.addEventListener("click", closeModal);
+        overlay.addEventListener("click", (event) => {
+          if (event.target === overlay) closeModal();
+        });
+
+        submitBtn.addEventListener("click", async () => {
+          errorEl.hidden = true;
+          // 押した瞬間に無効化し、応答が返るまで戻さない（連打での二重送信対策）。
+          submitBtn.disabled = true;
+          cancelBtn.disabled = true;
+
+          const quantity = Number(overlay.querySelector("#fm-quantity").value);
+          const price = Number(overlay.querySelector("#fm-price").value);
+          const feeRaw = overlay.querySelector("#fm-fee").value;
+          const fee = feeRaw === "" ? 0 : Number(feeRaw);
+          const tradedAtRaw = overlay.querySelector("#fm-traded-at").value;
+          let tradedAtIso = null;
+          if (tradedAtRaw) {
+            const d = new Date(tradedAtRaw);
+            tradedAtIso = Number.isNaN(d.getTime()) ? null : d.toISOString();
+          }
+
+          const result = await postFill({
+            client_key: clientKey || undefined,
+            proposal_id: proposal.id,
+            symbol: proposal.symbol,
+            side: isBuy ? "buy" : "sell",
+            quantity,
+            price,
+            fee,
+            traded_at: tradedAtIso,
+          });
+          // 失敗しても、次の送信で同じ鍵を使えるように覚えておく。
+          clientKey = result.client_key;
+
+          if (!result.ok) {
+            errorEl.textContent = result.message;
+            errorEl.hidden = false;
+            submitBtn.disabled = isBuy ? !checkbox.checked : false;
+            cancelBtn.disabled = false;
+            return;
+          }
+
+          closeModal();
+          showTransientMessage(
+            result.created ? "記録しました" : "この売買は記録済みです",
+            "info"
+          );
+          await loadAndRender();
+        });
+      }
+
+      function openSkipModal(proposal) {
+        document.getElementById("modal-root").innerHTML = "";
+        const overlay = document.createElement("div");
+        overlay.className = "modal-overlay";
+        overlay.innerHTML = `
+          <div class="modal-sheet">
+            <div class="modal-title">見送る</div>
+            <div class="modal-subtitle">${escapeHtml(proposal.symbol)} ・ ${escapeHtml(proposal.bucket)}枠</div>
+            <div class="form-row">
+              <label>見送る理由（あとで振り返るためのメモです）</label>
+              <textarea id="sk-reason" placeholder="例：値動きが怖くて手が出せなかった"></textarea>
+            </div>
+            <div class="error-text" id="sk-error" hidden></div>
+            <div class="modal-actions">
+              <button class="btn btn-secondary" id="sk-cancel" type="button">やめる</button>
+              <button class="btn btn-primary" id="sk-submit" type="button">見送る</button>
+            </div>
+          </div>
+        `;
+        document.getElementById("modal-root").appendChild(overlay);
+
+        const submitBtn = overlay.querySelector("#sk-submit");
+        const cancelBtn = overlay.querySelector("#sk-cancel");
+        const errorEl = overlay.querySelector("#sk-error");
+
+        cancelBtn.addEventListener("click", closeModal);
+        overlay.addEventListener("click", (event) => {
+          if (event.target === overlay) closeModal();
+        });
+
+        submitBtn.addEventListener("click", async () => {
+          errorEl.hidden = true;
+          submitBtn.disabled = true;
+          cancelBtn.disabled = true;
+
+          const reason = overlay.querySelector("#sk-reason").value.trim();
+          const result = await postSkip(proposal.id, reason);
+
+          if (!result.ok) {
+            errorEl.textContent = result.message;
+            errorEl.hidden = false;
+            submitBtn.disabled = false;
+            cancelBtn.disabled = false;
+            return;
+          }
+
+          closeModal();
+          showTransientMessage(
+            result.changed ? "見送りとして記録しました" : "この提案はすでに決着していました",
+            "info"
+          );
+          await loadAndRender();
+        });
+      }
+
+      // ---------------------------------------------------------------
+      // 一覧の描画
+      // ---------------------------------------------------------------
+
+      function renderUnappliedBanner(root, fills) {
+        if (!Array.isArray(fills) || fills.length === 0) return;
+        const wrap = document.createElement("div");
+        wrap.className = "banner banner-danger";
+        const title = document.createElement("div");
+        title.textContent = `反映できていない記録が${fills.length}件あります`;
+        wrap.appendChild(title);
+        const list = document.createElement("ul");
+        list.className = "unapplied-list";
+        for (const f of fills) {
+          const li = document.createElement("li");
+          const sideText = f.side === "sell" ? "売り" : "買い";
+          const reason = f.apply_error || "まだ反映されていません（次の処理を待っています）";
+          li.textContent = `${f.symbol}（${sideText}） … ${reason}`;
+          list.appendChild(li);
+        }
+        wrap.appendChild(list);
+        root.appendChild(wrap);
+      }
+
+      function renderProposalCard(p) {
+        const isBuy = p.action === "buy";
+        const card = document.createElement("div");
+        card.className = "card";
+
+        const head = document.createElement("div");
+        head.className = "proposal-card-head";
+        head.innerHTML = `
+          <div>
+            <span class="proposal-side ${isBuy ? "proposal-side-buy" : "proposal-side-sell"}">${
+          isBuy ? "買い" : "売り"
+        }</span>
+            <span class="proposal-symbol">${escapeHtml(p.symbol)}</span>
+            <span class="proposal-bucket">${escapeHtml(p.bucket)}枠</span>
+          </div>
+          <div class="days-old ${p.days_old > 0 ? "days-old-warn" : ""}">
+            ${p.days_old > 0 ? `${p.days_old}日前の提案` : "今日の提案"}
+          </div>
+        `;
+        card.appendChild(head);
+
+        const stopBlock = document.createElement("div");
+        stopBlock.className = "stop-loss-block";
+        stopBlock.innerHTML = `
+          <div class="stop-loss-label">
+            損切りライン（この値段まで下がったら自動で売る予約注文を、SBIで入れます）
+          </div>
+          <div class="stop-loss-value">${yen(p.stop_loss)}</div>
+        `;
+        card.appendChild(stopBlock);
+
+        const figures = document.createElement("div");
+        figures.className = "proposal-figures";
+        if (isBuy) {
+          figures.innerHTML = `
+            <div class="figure">
+              <div class="figure-label">投資額（株数 × 買値）</div>
+              <div class="figure-value">${yen(p.cost)}</div>
+            </div>
+            <div class="figure">
+              <div class="figure-label">利確ライン（値上がりしてこの値段になったら売る目安）</div>
+              <div class="figure-value figure-value-profit">${yen(p.take_profit)}</div>
+            </div>
+          `;
+        } else {
+          figures.innerHTML = `
+            <div class="figure">
+              <div class="figure-label">株数</div>
+              <div class="figure-value">${p.quantity === null || p.quantity === undefined ? "—" : `${p.quantity}株`}</div>
+            </div>
+            <div class="figure">
+              <div class="figure-label">利確ライン（値上がりしてこの値段になったら売る目安）</div>
+              <div class="figure-value figure-value-profit">${yen(p.take_profit)}</div>
+            </div>
+          `;
+        }
+        card.appendChild(figures);
+
+        const rationale = document.createElement("details");
+        rationale.className = "rationale";
+        const rationaleText = typeof p.rationale === "string" ? p.rationale : "";
+        const summaryText =
+          rationaleText.length > 40 ? `${rationaleText.slice(0, 40)}…` : rationaleText || "（理由の記載がありません）";
+        rationale.innerHTML = `
+          <summary>なぜ${isBuy ? "買う" : "売る"}のか：${escapeHtml(summaryText)}（タップで全文）</summary>
+          <p>${escapeHtml(rationaleText)}</p>
+        `;
+        card.appendChild(rationale);
+
+        const daysNote = document.createElement("p");
+        daysNote.className = "hint-text";
+        daysNote.textContent = `提案が出たのは ${whenText(p.created_at)}`;
+        card.appendChild(daysNote);
+
+        const actions = document.createElement("div");
+        actions.className = "proposal-actions";
+
+        const fillBtn = document.createElement("button");
+        fillBtn.className = `btn ${isBuy ? "btn-primary" : "btn-sell"}`;
+        fillBtn.textContent = isBuy ? "買った" : "売った";
+        fillBtn.addEventListener("click", () => openFillModal(p));
+
+        const skipBtn = document.createElement("button");
+        skipBtn.className = "btn btn-secondary";
+        skipBtn.textContent = "見送る";
+        skipBtn.addEventListener("click", () => openSkipModal(p));
+
+        actions.appendChild(fillBtn);
+        actions.appendChild(skipBtn);
+        card.appendChild(actions);
+
+        return card;
+      }
+
+      function renderBuckets(root, buckets) {
+        const card = document.createElement("div");
+        card.className = "card";
+        const h = document.createElement("h2");
+        h.textContent = "枠の空き状況";
+        card.appendChild(h);
+        for (const b of buckets) {
+          const row = document.createElement("div");
+          row.className = "bucket-row";
+          row.innerHTML = `
+            <div class="bucket-name">${escapeHtml(b.name)}枠</div>
+            <div class="bucket-slots">空き ${b.free}/${b.slots}（使用中 ${b.used}）</div>
+          `;
+          card.appendChild(row);
+        }
+        root.appendChild(card);
+      }
+
+      function renderCapital(root, state) {
+        const card = document.createElement("div");
+        card.className = "card";
+        const h = document.createElement("h2");
+        h.textContent = "現金と総資金";
+        card.appendChild(h);
+
+        const cashEntries = Object.entries(state.cash || {});
+        for (const [currency, amount] of cashEntries) {
+          const row = document.createElement("div");
+          row.className = "money-row";
+          const label = currency === "JPY" ? "現金" : `現金（${currency}）`;
+          const value =
+            currency === "JPY"
+              ? yen(amount)
+              : amount === null || amount === undefined
+                ? "—"
+                : `${Number(amount).toLocaleString("ja-JP")} ${currency}`;
+          row.innerHTML = `<div class="money-label">${label}</div><div class="money-value">${value}</div>`;
+          card.appendChild(row);
+        }
+
+        const totalRow = document.createElement("div");
+        totalRow.className = "money-row";
+        totalRow.innerHTML = `<div class="money-label">総資金</div><div class="money-value">${yen(state.capital)}</div>`;
+        card.appendChild(totalRow);
+
+        if (state.is_virtual) {
+          const note = document.createElement("p");
+          note.className = "hint-text";
+          note.textContent = "いまは仮の金額で検証している段階です（実際のお金はまだ動いていません）。";
+          card.appendChild(note);
+        }
+
+        root.appendChild(card);
+      }
+
+      async function runAnalyze(button) {
+        button.disabled = true;
+        const original = button.textContent;
+        button.textContent = "分析しています…";
+        const result = await postAnalyze();
+        button.disabled = false;
+        button.textContent = original;
+        if (!result.ok) {
+          showTransientMessage(result.message, "danger");
+          return;
+        }
+        showTransientMessage("分析を始めました。少し待ってからこの画面を開き直してください。", "info");
+      }
+
+      function renderMain(state) {
+        const main = document.getElementById("main-root");
+        main.innerHTML = "";
+
+        const bannerRoot = document.getElementById("banner-root");
+        bannerRoot.innerHTML = "";
+        renderUnappliedBanner(bannerRoot, state.unapplied_fills);
+
+        const priceNote = document.createElement("p");
+        priceNote.className = "hint-text";
+        priceNote.textContent = `更新：${whenText(
+          state.generated_at
+        )}／株価は15〜20分ほど遅れた情報です。いまの値段そのものではありません。`;
+        main.appendChild(priceNote);
+
+        const heading = document.createElement("h2");
+        heading.textContent = "未実行の提案";
+        main.appendChild(heading);
+
+        const proposals = Array.isArray(state.proposals) ? state.proposals : [];
+        if (proposals.length === 0) {
+          const empty = document.createElement("div");
+          empty.className = "empty-state";
+          empty.textContent = "いま未実行の提案はありません。";
+          main.appendChild(empty);
+        } else {
+          for (const p of proposals) {
+            try {
+              main.appendChild(renderProposalCard(p));
+            } catch (err) {
+              console.error("提案カードの表示に失敗しました", err);
+              const bad = document.createElement("div");
+              bad.className = "card";
+              bad.textContent = "この提案は表示できませんでした（データの形が想定と違います）。";
+              main.appendChild(bad);
+            }
+          }
+        }
+
+        try {
+          renderBuckets(main, Array.isArray(state.buckets) ? state.buckets : []);
+        } catch (err) {
+          console.error("枠の空き状況の表示に失敗しました", err);
+        }
+
+        try {
+          renderCapital(main, state);
+        } catch (err) {
+          console.error("現金・総資金の表示に失敗しました", err);
+        }
+
+        const analyzeCard = document.createElement("div");
+        analyzeCard.className = "card";
+        const analyzeBtn = document.createElement("button");
+        analyzeBtn.className = "btn btn-primary btn-block";
+        analyzeBtn.textContent = "いま分析して";
+        analyzeBtn.addEventListener("click", () => runAnalyze(analyzeBtn));
+        analyzeCard.appendChild(analyzeBtn);
+        const analyzeNote = document.createElement("p");
+        analyzeNote.className = "hint-text";
+        analyzeNote.textContent = "押すと、いまの株価をもとに提案を作り直します。少し時間がかかることがあります。";
+        analyzeCard.appendChild(analyzeNote);
+        main.appendChild(analyzeCard);
+      }
+
+      async function loadAndRender() {
+        const main = document.getElementById("main-root");
+        main.innerHTML = '<div class="loading-state">読み込んでいます…</div>';
+        try {
+          const state = await loadState();
+          renderMain(state);
+        } catch (err) {
+          main.innerHTML = "";
+          main.appendChild(banner("danger", err.message || "いまの状態を読み込めませんでした"));
+          const retryBtn = document.createElement("button");
+          retryBtn.className = "btn btn-secondary btn-block";
+          retryBtn.textContent = "もう一度読み込む";
+          retryBtn.addEventListener("click", () => loadAndRender());
+          main.appendChild(retryBtn);
+        }
+      }
+
+      document.getElementById("nav-root").appendChild(renderNav("today"));
+      loadAndRender();
+    </script>
+  </body>
+</html>
