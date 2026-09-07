@@ -16,6 +16,9 @@ allowed-tools: Read, Write, WebSearch, WebFetch
      各枠には `take_profit_pct`（利確幅）、`stop_loss_pct`（損切り幅）、
      `max_holding_days`（期限。営業日。null は期限なし）、
      `free`（空き枠数）が入っている。**`free` が 0 の枠には提案できない。**
+     **1回の判断で同じ枠に出せるのは `free` 件まで。** 超えた分は後段で
+     却下される（`free` は全体の残り枠でも頭打ちにしてあるため、
+     `slots - used` より小さいことがある）。
    - `candidates`: スクリーニングを通過した銘柄と財務指標。**各候補には
      `last_price` が入っており、これは今日の実際の市場価格である**（架空の値や
      古い値ではない）。あわせて `lot_size`（何株単位で買えるか）と

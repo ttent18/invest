@@ -349,3 +349,33 @@ def test_positions_without_a_bucket_are_counted_as_patient_not_ignored():
     ctx = assemble([], [{"symbol": "1111.T"}], {}, SETTINGS, SCREEN, dropped=[])
     by_name = {b["name"]: b for b in ctx["buckets"]}
     assert by_name["じっくり"]["used"] == 1
+
+
+def test_free_slots_never_exceed_the_overall_remaining_capacity():
+    """枠ごとの空きの合計が、全体の残り枠を超えないこと。
+
+    3銘柄すべて回転枠なら、回転0・じっくり2で合計2だが、全体の残りは1。
+    そのままAIに見せると、矛盾した数を根拠に判断させることになる。
+    （実際に上限を守らせているのは apply_decision.process のほう。
+    ここは表示を正すだけ。）
+    """
+    positions = [{"symbol": f"{i}.T", "bucket": "回転"} for i in range(3)]
+    ctx = assemble([], positions, {}, SETTINGS, SCREEN, dropped=[])
+    by_name = {b["name"]: b for b in ctx["buckets"]}
+
+    assert by_name["回転"]["free"] == 0
+    assert by_name["じっくり"]["free"] == 1   # 頭打ち前なら2
+    assert sum(b["free"] for b in ctx["buckets"]) <= 4 - len(positions)
+
+
+def test_positions_with_an_unknown_bucket_name_are_still_counted():
+    """知らない枠の名前でも数え落とさないこと。
+
+    読まれないキーに入れてしまうと、「数えたつもりで数え落とす」という、
+    この関数がいちばん避けたい形になる。
+    """
+    ctx = assemble([], [{"symbol": "1111.T", "bucket": "なんとなく"}],
+                   {}, SETTINGS, SCREEN, dropped=[])
+    by_name = {b["name"]: b for b in ctx["buckets"]}
+    assert by_name["じっくり"]["used"] == 1
+    assert sum(b["used"] for b in ctx["buckets"]) == 1

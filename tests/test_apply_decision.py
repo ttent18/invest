@@ -4,7 +4,7 @@ import pytest
 
 from investment.config import SETTINGS
 from investment.db import apply_migrations, connect
-from investment.jobs.apply_decision import enrich, insert_proposals, validate
+from investment.jobs.apply_decision import enrich, insert_proposals, process, validate
 
 CTX = {
     "can_open_new": True,
@@ -802,3 +802,122 @@ def test_sell_is_rejected_when_the_position_has_no_bucket():
     ctx = dict(CTX, positions=[{"symbol": "3993.T", "quantity": 100}])
     errors = validate(good_sell(quantity=100), ctx, SETTINGS)
     assert any("枠" in e for e in errors), errors
+
+
+# --- 1回の判断の中で、枠の数を超えて買えないこと ----------------------------
+# 検証は1件ずつ独立に同じ context を見るため、そのままでは
+# 「空き2の枠に3件出したら3件とも通る」という状態になっていた。
+# 空き枠の表示を直すだけでは何も止まらない。通した件数を数える必要がある。
+
+
+def test_validate_counts_what_was_already_accepted_in_this_batch():
+    """このバッチで既に通した件数を差し引いて空きを見ること。"""
+    ctx = _ctx_with_buckets()   # じっくり枠の空きは2
+
+    assert validate(_patient(symbol="3993.T"), ctx, SETTINGS, taken={}) == []
+    assert validate(_patient(symbol="3993.T"), ctx, SETTINGS, taken={"じっくり": 1}) == []
+    errors = validate(_patient(symbol="3993.T"), ctx, SETTINGS, taken={"じっくり": 2})
+    assert any("空き" in e for e in errors), errors
+
+
+def test_validate_stops_at_the_overall_limit_across_buckets():
+    """枠ごとに空きがあっても、全体の上限を超えたら止めること。
+
+    保有3件（全体4枠中の残り1）で、じっくりと回転に1件ずつ出すと、
+    枠ごとには空いていても合計5件になる。
+    """
+    ctx = _ctx_with_buckets(positions=[{"symbol": f"{i}.T"} for i in range(3)])
+    ctx["buckets"] = [
+        {**ctx["buckets"][0], "used": 0, "free": 1},
+        {**ctx["buckets"][1], "used": 3, "free": 0},
+    ]
+    # 1件目は通る
+    assert validate(_patient(), ctx, SETTINGS, taken={}) == []
+    # 2件目は全体の上限で止まる
+    errors = validate(_fast(), ctx, SETTINGS, taken={"じっくり": 1})
+    assert any("空き" in e for e in errors), errors
+
+
+def test_process_rejects_the_third_buy_into_a_two_slot_bucket():
+    """本番の経路（process）で、空き2の枠に3件出したら3件目が却下されること。
+
+    これが指摘の本体。validate を1件ずつ呼ぶだけでは止まらなかった。
+    """
+    from unittest.mock import patch
+
+    ctx = _ctx_with_buckets()
+    ctx["candidates"] = [{"symbol": f"{i}.T", "last_price": 1200.0} for i in range(1, 4)]
+    decisions = [_patient(symbol=f"{i}.T") for i in range(1, 4)]
+
+    with (
+        patch("investment.jobs.apply_decision.insert_proposals") as insert,
+        patch("investment.jobs.apply_decision.record_rejections") as reject,
+    ):
+        accepted, rejected = process(None, ctx, decisions, "journal/x.md", SETTINGS)
+
+    assert (accepted, rejected) == (2, 1)
+    assert [d["symbol"] for d in insert.call_args.args[1]] == ["1.T", "2.T"]
+    # 却下された事実は data_gaps に残る（黙って捨てない）
+    reject.assert_called_once()
+    assert reject.call_args.args[1][0][0] == "3.T"
+
+
+def test_process_counts_the_two_buckets_separately():
+    """枠が違えば、それぞれの空き枠まで通ること。"""
+    from unittest.mock import patch
+
+    ctx = _ctx_with_buckets()
+    ctx["candidates"] = [{"symbol": f"{i}.T", "last_price": 1200.0} for i in range(1, 5)]
+    decisions = [
+        _patient(symbol="1.T"), _patient(symbol="2.T"),
+        _fast(symbol="3.T"), _fast(symbol="4.T"),
+    ]
+
+    with (
+        patch("investment.jobs.apply_decision.insert_proposals"),
+        patch("investment.jobs.apply_decision.record_rejections"),
+    ):
+        accepted, rejected = process(None, ctx, decisions, "journal/x.md", SETTINGS)
+
+    assert (accepted, rejected) == (4, 0)
+
+
+def test_process_records_a_sell_whose_bucket_disagreed_with_the_holding():
+    """AIが保有と違う枠を書いたら、保存はするが記録も残すこと。
+
+    保有側が正なので上書きして保存する（却下しない）。ただし黙って直すと、
+    AIの間違いという最も価値のある材料が消える。
+    """
+    from unittest.mock import patch
+
+    ctx = dict(CTX, positions=[{"symbol": "3993.T", "quantity": 100, "bucket": "回転"}])
+    d = good_sell(quantity=100, bucket="じっくり")  # AIの書いた枠は間違い
+
+    with (
+        patch("investment.jobs.apply_decision.insert_proposals") as insert,
+        patch("investment.jobs.apply_decision.record_rejections") as record,
+    ):
+        accepted, rejected = process(None, ctx, [d], "journal/x.md", SETTINGS)
+
+    assert (accepted, rejected) == (1, 0)          # 却下はしない
+    assert insert.call_args.args[1][0]["bucket"] == "回転"   # 保有側で保存
+    record.assert_called_once()                     # 食い違いは記録される
+    assert "回転" in record.call_args.args[1][0][1][0]
+
+
+def test_price_tolerance_scales_with_the_currency_of_the_symbol():
+    """許容誤差の下限を、値段の刻み幅の半分にすること。
+
+    日本株は1円刻みなので0.5、米国株は1セント刻みなので0.005。
+    どちらも0.5にすると、50ドルの株で +21%〜+23% が通ってしまい、
+    円建てで直したはずのズレがドル建てで再発する。
+    """
+    from investment.jobs.apply_decision import _price_tolerance
+
+    # 日本株: 安い株でも1円の四捨五入を吸収できる
+    assert _price_tolerance(100.0, "7203.T") == 0.5
+    # 日本株: 高くなれば価格に比例した幅になる
+    assert _price_tolerance(1000.0, "7203.T") == 2.0
+    # 米国株: 下限は1セントの半分。50ドルなら比例分(0.1)のほうが大きい
+    assert _price_tolerance(1.0, "AAPL") == 0.005
+    assert _price_tolerance(50.0, "AAPL") == 0.1

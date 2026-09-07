@@ -158,8 +158,21 @@ def test_every_bucket_defined_in_the_code_can_actually_be_saved(conn):
                 """,
                 (f"{1000 + i}.T", b.name),
             )
+            # positions 側も同じ制約を持つ。売りは保有から枠を読むので、
+            # こちらだけ更新し忘れると売りが一切できなくなる。
+            cur.execute(
+                """
+                INSERT INTO positions
+                    (symbol, quantity, avg_price, currency, take_profit, stop_loss,
+                     opened_at, bucket)
+                VALUES (%s, 100, 1200, 'JPY', 1464, 1104, NOW(), %s)
+                """,
+                (f"{1000 + i}.T", b.name),
+            )
     conn.commit()
 
     with conn.cursor() as cur:
         cur.execute("SELECT bucket FROM proposals ORDER BY id")
         assert [r["bucket"] for r in cur.fetchall()] == [b.name for b in BUCKETS]
+        cur.execute("SELECT bucket FROM positions ORDER BY symbol")
+        assert sorted(r["bucket"] for r in cur.fetchall()) == sorted(b.name for b in BUCKETS)

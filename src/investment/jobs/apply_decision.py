@@ -7,7 +7,7 @@ import json
 import sys
 from pathlib import Path
 
-from investment.config import BUCKETS, SETTINGS, Settings, bucket_by_name
+from investment.config import BUCKETS, MAX_POSITIONS, SETTINGS, Settings, bucket_by_name
 from investment.db import connect, record_gap
 from investment.market import is_japanese, lot_size
 from investment.sizing import position_size, required_win_rate
@@ -39,15 +39,24 @@ ENTRY_PRICE_TOLERANCE = 0.10
 #
 # 固定値（1円）にしないのは、安い株では1円が相対的に大きすぎるため。
 # 株価100円だと1円は1%で、損切りが -7%〜-9% のどれでも通ってしまい、
-# まさに測ろうとしている数字が12.5%もぶれる。また米国株（ドル建て）が
-# 入ったとき、1ドルの誤差は50ドル株で+20%〜+24%を通してしまう。
-PRICE_MATCH_MIN_TOLERANCE = 0.51
+# まさに測ろうとしている数字が12.5%もぶれる。
+#
+# 下限は「値段の刻み幅の半分」。日本株は1円刻みなので0.5、米国株は
+# 1セント刻みなので0.005。ここを通貨によらず0.5にすると、50ドルの株で
+# +21%〜+23%を通してしまい、円建てで直したはずのズレがドル建てで再発する。
 PRICE_MATCH_TOLERANCE_PCT = 0.002
+JP_TICK = 1.0    # 日本株の値段の刻み幅（円）
+US_TICK = 0.01   # 米国株の値段の刻み幅（ドル）
 
 
-def _price_tolerance(price: float) -> float:
-    """この価格で、丸めによる差とみなす幅を返す。"""
-    return max(PRICE_MATCH_MIN_TOLERANCE, abs(price) * PRICE_MATCH_TOLERANCE_PCT)
+def _price_tolerance(price: float, symbol: str) -> float:
+    """この価格で、丸めによる差とみなす幅を返す。
+
+    四捨五入の誤差は最大で刻み幅の半分なので、それを下回らないようにする。
+    そのうえで、値段が大きいほど差も出るため価格に比例する幅も見る。
+    """
+    tick = JP_TICK if is_japanese(symbol) else US_TICK
+    return max(tick / 2, abs(price) * PRICE_MATCH_TOLERANCE_PCT)
 
 
 def _to_float(decision: dict, field: str) -> tuple[float | None, str | None]:
@@ -89,8 +98,14 @@ def _to_positive_int_quantity(decision: dict) -> tuple[int | None, str | None]:
     return n, None
 
 
-def validate(decision: dict, ctx: dict, settings: Settings) -> list[str]:
+def validate(
+    decision: dict, ctx: dict, settings: Settings, taken: dict[str, int] | None = None
+) -> list[str]:
     """判断が制約を満たすか調べる。問題があればメッセージを返す。
+
+    taken は「このバッチで既に採用した件数」を枠ごとに数えたもの。
+    検証は1件ずつ独立に同じ ctx を見るため、これを渡さないと
+    「空き2の枠に3件出したら3件とも通る」ことになる。process() が渡す。
 
     検証に通った場合、decision["quantity"] は検証で使った整数値に
     正規化される(例: 33.0 → 33)。insert_proposals はこの decision を
@@ -178,10 +193,21 @@ def validate(decision: dict, ctx: dict, settings: Settings) -> list[str]:
                 f"（使えるのは {[b.name for b in BUCKETS]} のいずれか）"
             )
         else:
-            if bucket["free"] <= 0:
+            # このバッチで既に通した件数を差し引いて空きを見る。
+            already = (taken or {}).get(rule.name, 0)
+            if bucket["free"] - already <= 0:
                 errors.append(
                     f"{rule.name}枠に空きがありません"
-                    f"（{rule.slots}枠すべて使用中）"
+                    f"（{rule.slots}枠中、保有 {bucket['used']} 件"
+                    f"＋この判断で採用済み {already} 件）"
+                )
+            # 枠ごとに空きがあっても、全体の上限は超えられない。
+            # 例: 保有3件（全体4枠）で、じっくりと回転に1件ずつ出すと合計5件になる。
+            elif MAX_POSITIONS - len(ctx["positions"]) - sum((taken or {}).values()) <= 0:
+                errors.append(
+                    f"全体の枠に空きがありません"
+                    f"（{MAX_POSITIONS}枠中、保有 {len(ctx['positions'])} 件"
+                    f"＋この判断で採用済み {sum((taken or {}).values())} 件）"
                 )
             if entry is not None:
                 for field, pct, direction in (
@@ -192,7 +218,7 @@ def validate(decision: dict, ctx: dict, settings: Settings) -> list[str]:
                     actual = tp if field == "take_profit" else sl
                     if actual is None:
                         continue
-                    if abs(actual - expected) > _price_tolerance(expected):
+                    if abs(actual - expected) > _price_tolerance(expected, decision["symbol"]):
                         errors.append(
                             f"{field} {actual} が{rule.name}枠の決まり"
                             f"（買値の{direction * pct:+.0%}＝{expected:,.2f}円）"
@@ -260,6 +286,8 @@ def validate(decision: dict, ctx: dict, settings: Settings) -> list[str]:
                     f"（枠が分からないまま保存すると、枠ごとの成績から漏れます）"
                 )
             else:
+                # 保有側が正なので上書きする。AIが違う枠を書いていた場合は
+                # process() が上書き前後を比べて記録する（黙って直さない）。
                 decision["bucket"] = held_bucket
 
         if position is not None and quantity is not None:
@@ -389,12 +417,28 @@ def process(
     戻り値は (採用件数, 却下件数)。
     """
     accepted, rejected = [], []
+    # このバッチで枠ごとに何件通したかを数えながら進む。数えないと、
+    # 検証が1件ずつ同じ ctx を見るだけになり、空き枠を超えて通ってしまう。
+    taken: dict[str, int] = {}
+    # 売りでAIが書いた枠が保有と食い違った件。却下はしない（保有側の値で
+    # 上書きすれば正しく保存できる）が、AIの間違いは最も価値のある材料なので、
+    # 上書きだけして黙って消さずに記録する。
+    mismatches: list[tuple[str, list[str]]] = []
     for d in decisions:
-        errors = validate(d, ctx, settings)
+        stated_bucket = d.get("bucket") if d.get("action") == "sell" else None
+        errors = validate(d, ctx, settings, taken)
         if errors:
             rejected.append((d.get("symbol", "?"), errors))
-        else:
-            accepted.append(enrich(d, ctx, settings))
+            continue
+        if stated_bucket and stated_bucket != d.get("bucket"):
+            note = (
+                f"売りの bucket が保有と違いました。AIの記述: {stated_bucket!r}、"
+                f"実際の保有: {d['bucket']!r}。保有側の値で保存しました"
+            )
+            mismatches.append((d["symbol"], [note]))
+        accepted.append(enrich(d, ctx, settings))
+        if d["action"] == "buy":
+            taken[d["bucket"]] = taken.get(d["bucket"], 0) + 1
 
     for symbol, errors in rejected:
         print(f"却下 {symbol}: {'; '.join(errors)}")
@@ -403,6 +447,10 @@ def process(
         insert_proposals(conn, accepted, journal_path)
     if rejected:
         record_rejections(conn, rejected)
+    if mismatches:
+        for symbol, notes in mismatches:
+            print(f"注意 {symbol}: {notes[0]}")
+        record_rejections(conn, mismatches)
     if not accepted and not rejected:
         record_no_proposals(conn, ctx, decisions)
 
