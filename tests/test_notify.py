@@ -6,6 +6,8 @@
 
 from unittest.mock import patch
 
+from requests.exceptions import ConnectionError as RequestsConnectionError
+
 from investment.notify import send
 
 
@@ -67,6 +69,31 @@ def test_send_records_a_failure_that_is_not_an_expired_device():
         patch("investment.notify.select_push_subscriptions", return_value=_subs()[:1]),
         patch("investment.notify.WebPushException", FakeWebPushException),
         patch("investment.notify.webpush", side_effect=FakeWebPushException(500)),
+        patch("investment.notify.delete_push_subscription") as delete,
+        patch("investment.notify.record_gap") as gap,
+        patch("investment.notify.VAPID_PRIVATE_KEY", "dummy"),
+        patch("investment.notify.VAPID_SUBJECT", "mailto:test@example.com"),
+    ):
+        ok, failed = send(conn=None, title="t", body="b")
+
+    assert (ok, failed) == (0, 1)
+    delete.assert_not_called()
+    gap.assert_called_once()
+
+
+def test_send_records_a_failure_that_is_not_a_web_push_exception():
+    """通信の失敗（名前解決・接続断・タイムアウト等）は WebPushException ではない。
+
+    pywebpush は requests.exceptions.* や、鍵の形式が壊れているときの
+    Vapid.from_string（ValueError）の例外も投げる。これらが send() を
+    素通りすると、main() まで落ちて分析や朝の確認を巻き添えにしてしまう。
+    """
+    with (
+        patch("investment.notify.select_push_subscriptions", return_value=_subs()[:1]),
+        patch(
+            "investment.notify.webpush",
+            side_effect=RequestsConnectionError("名前解決に失敗"),
+        ),
         patch("investment.notify.delete_push_subscription") as delete,
         patch("investment.notify.record_gap") as gap,
         patch("investment.notify.VAPID_PRIVATE_KEY", "dummy"),

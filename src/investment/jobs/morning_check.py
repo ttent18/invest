@@ -11,7 +11,6 @@ SBI証券には参照系のAPIがなく、米国株は約定通知メールも�
 そのため、直近の一定期間（LOOKBACK_DAYS）を遡って値動きを確認する。
 """
 
-import datetime as datetime_module
 import sys
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -47,15 +46,8 @@ def _lookback_window(opened_at: date, today: date) -> tuple[date, date] | None:
 
 
 def _opened_date(opened_at, today: date) -> date:
-    """positions.opened_at (date または timezone付きdatetime) を日本時間の日付にする。
-
-    isinstance の判定には datetime_module.datetime を使う（date や
-    timedelta と一緒に import した datetime クラスではなく）。main() の
-    「今日」を差し替えるテストが investment.jobs.morning_check.datetime を
-    丸ごと置き換えるため、そちらを判定にも使うと、今日を差し替えただけの
-    テストでここが date でも datetime でもない別物と誤判定してしまう。
-    """
-    if isinstance(opened_at, datetime_module.datetime):
+    """positions.opened_at (date または timezone付きdatetime) を日本時間の日付にする。"""
+    if isinstance(opened_at, datetime):
         if opened_at.tzinfo is not None:
             opened_at = opened_at.astimezone(JST)
         return opened_at.date()
@@ -236,16 +228,19 @@ def main() -> int:
     # 到達の可能性か期限切れがあるときだけ通知する。
     # 何も起きていない朝に通知すると、通知そのものが意味を失う。
     if hits or expired:
+        # ロック画面ではこの文面が全文になる。「約定」は初心者には分からない
+        # 言葉（注文が成立すること）なので使わない。タイトルだけでも
+        # 「何を確認すればいいか」が伝わるようにする。
         parts = []
         if hits:
-            parts.append(f"{len(hits)} 件が約定した可能性")
+            parts.append(f"{len(hits)} 件が売れた可能性")
         if expired:
             parts.append(f"{len(expired)} 件が期限切れ")
         with connect() as conn:
             notify_send(
                 conn,
-                title="確認してください",
-                body="、".join(parts),
+                title="SBIで持ち株を確認してください",
+                body=" ／ ".join(parts),
                 url="/holdings",
             )
     return code

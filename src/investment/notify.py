@@ -12,6 +12,7 @@ import json
 import os
 
 from pywebpush import WebPushException, webpush
+from requests.exceptions import RequestException
 
 from investment.db import delete_push_subscription, record_gap, select_push_subscriptions
 
@@ -64,6 +65,20 @@ def send(conn, title: str, body: str, url: str = "/") -> tuple[int, int]:
             if status in EXPIRED_STATUS:
                 delete_push_subscription(conn, sub["endpoint"])
                 continue
+            record_gap(
+                conn,
+                scope="notify:failed",
+                detail=f"通知を送れませんでした（宛先 {sub['endpoint']}）: {exc}",
+            )
+        except (RequestException, ValueError) as exc:
+            # WebPushException だけでは足りない。pywebpush は他にも:
+            # - 通信そのものの失敗（名前解決・接続断・タイムアウト）は
+            #   requests.exceptions.RequestException のサブクラスで投げる
+            # - 鍵の形式が壊れている場合は Vapid.from_string が ValueError を投げる
+            # これらを捕まえずにいると main() まで素通りし、既にコミット済みの
+            # 提案保存や朝の確認の判定そのものを巻き添えにしてしまう
+            # （このファイル冒頭の約束を破る）。
+            failed += 1
             record_gap(
                 conn,
                 scope="notify:failed",

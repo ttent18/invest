@@ -359,17 +359,21 @@ def test_main_does_not_notify_on_a_quiet_morning():
 
 
 def test_main_notifies_when_a_position_passed_its_deadline():
-    """回転枠の期限切れは、値動きが無くても知らせる。降りる必要があるため。"""
-    old = date(2026, 8, 24)
+    """回転枠の期限切れは、値動きが無くても知らせる。降りる必要があるため。
+
+    opened_at を十分に古い日付にすることで、実際の「今日」が何日であっても
+    確実に期限切れになる。「今日」を差し替えるモックは使わない
+    （investment.jobs.morning_check.datetime を丸ごと置き換えると、
+    date 単体で isinstance 判定している他のコードまで巻き込まれるため脆い）。
+    """
+    old = date(2020, 1, 1)
     with (
         patch("investment.jobs.morning_check.connect"),
         patch("investment.jobs.morning_check.select_positions",
               return_value=[{"symbol": "1111.T", "bucket": "回転", "opened_at": old}]),
         patch("investment.jobs.morning_check.run", return_value=([], 0, 1)),
-        patch("investment.jobs.morning_check.datetime") as dt,
         patch("investment.jobs.morning_check.notify_send") as notify,
     ):
-        dt.now.return_value.date.return_value = date(2026, 9, 7)
         main()
 
     notify.assert_called_once()

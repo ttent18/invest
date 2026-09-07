@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+import yaml
 
 from investment.jobs.migrate import main
 
@@ -71,12 +72,38 @@ def test_fills_are_applied_before_anything_reads_the_positions(workflow: str):
     )
 
 
-@pytest.mark.parametrize("workflow", ["analyze.yml", "morning.yml"])
-def test_the_notification_keys_reach_the_step_that_sends_them(workflow: str):
-    """通知を送るステップに鍵が渡っていること。
+@pytest.mark.parametrize(
+    ("workflow", "sending_module"),
+    [
+        ("analyze.yml", "investment.jobs.apply_decision"),
+        ("morning.yml", "investment.jobs.morning_check"),
+    ],
+)
+def test_the_notification_keys_reach_the_step_that_sends_them(
+    workflow: str, sending_module: str
+):
+    """通知を送るステップの env に、鍵がちゃんと渡っていること。
 
-    渡し忘れると、鍵が無いという記録だけが毎回積もる。
+    ファイルのどこかに鍵の名前があるだけでは足りない。別のステップ
+    （例えばマイグレーション）の env に付いていても、それだけで
+    このテストが通ってしまっては、渡し忘れを検出できない。
+    YAML として読み、通知を実際に送る処理（apply_decision / morning_check）
+    を実行するステップの env に、両方の鍵があることまで見る。
     """
-    text = (WORKFLOWS / workflow).read_text(encoding="utf-8")
-    assert "VAPID_PRIVATE_KEY" in text
-    assert "VAPID_SUBJECT" in text
+    doc = yaml.safe_load((WORKFLOWS / workflow).read_text(encoding="utf-8"))
+    job = next(iter(doc["jobs"].values()))
+    sending_steps = [
+        step for step in job["steps"] if sending_module in str(step.get("run", ""))
+    ]
+    assert sending_steps, (
+        f"{workflow} に {sending_module} を実行するステップが見つかりません"
+    )
+    env = sending_steps[0].get("env") or {}
+    assert "VAPID_PRIVATE_KEY" in env, (
+        f"{workflow} の {sending_module} を実行するステップに"
+        f" VAPID_PRIVATE_KEY が渡っていません"
+    )
+    assert "VAPID_SUBJECT" in env, (
+        f"{workflow} の {sending_module} を実行するステップに"
+        f" VAPID_SUBJECT が渡っていません"
+    )
