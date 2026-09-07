@@ -1,0 +1,24 @@
+# シークレット（Discord Bot トークン、API キーなど）
+.env
+.env.*
+!.env.example
+*.key
+
+# データベース（取引記録は個人情報を含むためコミットしない）
+data/*.db
+data/*.db-journal
+data/*.sqlite*
+
+# SBI からダウンロードした約定履歴 CSV
+data/csv/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# macOS / Windows
+.DS_Store
+Thumbs.db
