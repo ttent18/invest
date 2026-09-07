@@ -9,6 +9,7 @@ investment.jobs.apply_fills が行う。分けている理由は、計算のテ�
 """
 
 from dataclasses import dataclass
+from datetime import date
 
 from investment.config import Bucket
 
@@ -103,5 +104,72 @@ def apply_buy(
             "bucket": rule.name,
             "realized_pnl": None,
             "holding_days": None,
+        },
+    )
+
+
+@dataclass(frozen=True)
+class SellResult:
+    """売りを反映した結果。
+
+    position が None なら、全部売って保有が無くなったという意味。
+    cash_delta は現金の増減（売りなので正の数）。
+    """
+
+    position: Position | None
+    cash_delta: float
+    trade: dict
+
+
+def apply_sell(
+    existing: Position | None, fill: dict, opened_at: date | None, today: date
+) -> SellResult:
+    """売った申告を反映した結果を返す。
+
+    opened_at はその銘柄を最初に持った日。保有日数の計算に使う。
+
+    確定した損益・枠・保有日数を、この時点で取引に書き込む。あとで買いと
+    売りを突き合わせ直す方式にすると「どの買いに対する売りか」という
+    曖昧さが入り込むため、売った時点で確定させる。
+    """
+    if existing is None:
+        raise FillError(f"{fill['symbol']} を保有していません")
+    if fill["quantity"] > existing.quantity:
+        raise FillError(
+            f"{fill['symbol']} の保有は {existing.quantity} 株で、"
+            f"{fill['quantity']} 株は売れません"
+        )
+
+    proceeds = fill["quantity"] * fill["price"] - fill["fee"]
+    realized = (fill["price"] - existing.avg_price) * fill["quantity"] - fill["fee"]
+    remaining = existing.quantity - fill["quantity"]
+
+    # 平均取得単価は「いくらで買ったか」なので、売っても動かさない。
+    position = None
+    if remaining > 0:
+        position = Position(
+            symbol=existing.symbol,
+            quantity=remaining,
+            avg_price=existing.avg_price,
+            bucket=existing.bucket,
+            take_profit=existing.take_profit,
+            stop_loss=existing.stop_loss,
+        )
+
+    holding_days = (today - opened_at).days if opened_at is not None else None
+
+    return SellResult(
+        position=position,
+        cash_delta=proceeds,
+        trade={
+            "symbol": fill["symbol"],
+            "side": "sell",
+            "quantity": fill["quantity"],
+            "price": fill["price"],
+            "currency": fill["currency"],
+            "fee": fill["fee"],
+            "bucket": existing.bucket,
+            "realized_pnl": realized,
+            "holding_days": holding_days,
         },
     )
