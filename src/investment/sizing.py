@@ -28,15 +28,24 @@ def position_size(
     max_position_pct: float,
     entry: float,
     stop_loss: float,
+    lot_size: int = 1,
 ) -> int:
     """買える株数を返す。
 
-    2つの上限のうち小さいほうを採る。
+    2つの上限のうち小さいほうを採り、最後に売買単位に切り下げる。
       1. 1取引の損失許容額 ÷ 1株あたりの想定損失
       2. 1銘柄への投入上限 ÷ 株価
+      3. 上記を lot_size（売買単位）の倍数に切り下げる
+
+    lot_size は「何株をひとまとまりとして売買するか」。日本株は100、
+    米国株は1（investment.market.lot_size を使うこと）。
+    1単元すら買えない場合は 0 を返す。0 は「この銘柄はこの資金では
+    買えない」という意味であり、呼び出し側はそれを買えないものとして扱う。
     """
     if entry <= stop_loss:
         raise ValueError("stop_loss は entry より小さい必要があります")
+    if lot_size < 1:
+        raise ValueError("lot_size は1以上である必要があります")
 
     # IEEE-754の浮動小数除算は、数学的にちょうど整数になる商でも
     # わずかに下回る値（例: 15.0 のはずが 14.999999999999998）を返すことがある。
@@ -46,4 +55,8 @@ def position_size(
     loss_per_share = entry - stop_loss
     by_risk = math.floor(round(capital * risk_pct / loss_per_share, 9))
     by_cap = math.floor(round(capital * max_position_pct / entry, 9))
-    return max(0, min(by_risk, by_cap))
+    shares = max(0, min(by_risk, by_cap))
+
+    # 売買単位の倍数に切り下げる。100株単位の銘柄で104株は注文できないので
+    # 100株にする。1単元にも満たなければ 0（買えない）。
+    return shares - shares % lot_size

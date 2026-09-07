@@ -79,3 +79,40 @@ def test_position_size_handles_float_rounding_on_cap_side():
     entry = 66.66666666666667
     stop_loss = entry - 1
     assert position_size(50_000, 1.0, 0.02, entry, stop_loss) == 15
+
+
+# --- 売買単位（単元株）を守る -----------------------------------------------
+
+
+def test_position_size_rounds_down_to_the_lot_size():
+    """日本株は100株単位。端数を切り捨てて100の倍数にする。
+
+    550,000円の25% = 137,500円。1株1,318円なら計算上は104株買えるが、
+    実際には100株単位でしか注文できないので100株になる。
+    """
+    assert position_size(550_000, 0.02, 0.25, 1318, 1213, lot_size=100) == 100
+
+
+def test_position_size_returns_zero_when_one_lot_exceeds_the_limit():
+    """1単元（100株）ですら上限を超える銘柄は「買えない」= 0株。
+
+    これが今回いちばん重要な挙動。株価2,704円だと100株で270,400円になり、
+    1銘柄上限137,500円を大きく超えるため、この銘柄は買えない。
+    以前はこの制限が無く、実際には注文できない30株という答えを返していた。
+    """
+    assert position_size(550_000, 0.02, 0.25, 2704, 2487, lot_size=100) == 0
+
+
+def test_position_size_defaults_to_one_share_units():
+    """lot_size を指定しなければ1株単位（米国株や、単元の無い場合）。"""
+    assert position_size(550_000, 0.02, 0.25, 2704, 2487) == 50
+
+
+def test_position_size_lot_rounding_applies_to_the_risk_limit_too():
+    """損失許容額のほうが厳しい場合も、単元に切り下げる。
+
+    損切り幅が広いと「損失許容額 ÷ 1株あたりの損失」が効く。
+    550,000円の2% = 11,000円。1株あたり50円の損失なら220株だが、
+    100株単位なので200株になる。
+    """
+    assert position_size(550_000, 0.02, 0.25, 500, 450, lot_size=100) == 200

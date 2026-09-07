@@ -1,6 +1,10 @@
 import pytest
 
-from investment.market import is_japanese, normalize_symbol
+from investment.market import (
+    is_japanese,
+    lot_size,
+    normalize_symbol,
+)
 
 
 @pytest.mark.parametrize(
@@ -256,3 +260,23 @@ def test_fetch_range_raises_on_network_failure():
         pytest.raises(MarketDataError),
     ):
         fetch_range("7203.T", _date(2026, 9, 1), _date(2026, 9, 3))
+
+
+# --- 売買単位（単元株） -----------------------------------------------------
+
+
+def test_lot_size_is_100_for_japanese_stocks():
+    """日本株は100株単位でしか売買できない。
+
+    SBI証券には1株から買える「S株」もあるが、成行注文しか出せず逆指値が
+    使えない（https://search.sbisec.co.jp/v2/popwin/attention/trading/stock_07.html）。
+    このシステムは損切りを証券会社側の逆指値に任せる設計なので、S株は使えない。
+    """
+    assert lot_size("7203.T") == 100
+    assert lot_size("3723.T") == 100
+
+
+def test_lot_size_is_1_for_us_stocks():
+    """米国株は1株から買える。"""
+    assert lot_size("AAPL") == 1
+    assert lot_size("NVDA") == 1

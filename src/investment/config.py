@@ -30,8 +30,8 @@ class ScreenCriteria:
 
 SETTINGS = Settings(
     total_capital=550_000,
-    max_position_pct=0.15,
-    max_positions=5,
+    max_position_pct=0.25,
+    max_positions=4,
     risk_per_trade_pct=0.02,
     stop_loss_pct=0.08,
     take_profit_pct=0.22,

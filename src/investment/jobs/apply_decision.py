@@ -9,7 +9,7 @@ from pathlib import Path
 
 from investment.config import SETTINGS, Settings
 from investment.db import connect, record_gap
-from investment.market import is_japanese
+from investment.market import is_japanese, lot_size
 from investment.sizing import position_size, required_win_rate
 
 REQUIRED_FIELDS = (
@@ -136,14 +136,29 @@ def validate(decision: dict, ctx: dict, settings: Settings) -> list[str]:
             errors.append("同時保有の上限に達しているため新規に買えません")
 
         if entry is not None and sl is not None and quantity is not None and sl < entry:
+            # 日本株は100株単位でしか注文できない（単元）。AIは「上限金額÷株価」で
+            # 株数を出しがちだが、その答えは実際には発注できないことがある。
+            unit = lot_size(decision["symbol"])
             allowed = position_size(
                 settings.total_capital,
                 settings.risk_per_trade_pct,
                 settings.max_position_pct,
                 entry,
                 sl,
+                lot_size=unit,
             )
-            if quantity > allowed:
+            if unit > 1 and quantity % unit != 0:
+                errors.append(
+                    f"quantity {quantity} は{unit}株単位ではありません"
+                    f"（日本株は{unit}株単位でしか注文できません）"
+                )
+            if allowed == 0:
+                errors.append(
+                    f"{decision['symbol']} は{unit}株で {entry * unit:,.0f}円 になり、"
+                    f"1銘柄の上限 {settings.total_capital * settings.max_position_pct:,.0f}円 "
+                    f"を超えるため買えません"
+                )
+            elif quantity > allowed:
                 errors.append(f"quantity {quantity} が上限 {allowed} 株を超えています")
 
     elif decision["action"] == "sell":

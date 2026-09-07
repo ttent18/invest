@@ -66,6 +66,29 @@ def is_japanese(symbol: str) -> bool:
     return symbol.endswith(".T")
 
 
+# 日本株の売買単位。日本株は通常100株をひとまとまりとして売買する
+# （このまとまりを「単元」と呼ぶ）。37株だけ買うといった注文は出せない。
+#
+# SBI証券には1株から買える「S株」という仕組みもあるが、これは使わない。
+# S株は成行注文（値段を指定しない注文）しか出せず、
+# 「この値段まで下がったら売る」という逆指値注文が使えないため
+# （https://search.sbisec.co.jp/v2/popwin/attention/trading/stock_07.html）。
+# このシステムは損切りを証券会社側の逆指値に任せる設計なので、
+# S株を使うと損切りが機能しなくなる。
+JP_LOT_SIZE = 100
+
+# 米国株は1株から買える。
+US_LOT_SIZE = 1
+
+
+def lot_size(symbol: str) -> int:
+    """この銘柄を売買できる最小の株数（単元）を返す。
+
+    日本株は100株、米国株は1株。買う株数は必ずこの倍数にする必要がある。
+    """
+    return JP_LOT_SIZE if is_japanese(symbol) else US_LOT_SIZE
+
+
 class MarketDataError(RuntimeError):
     """株価・財務データの取得に失敗した。
 

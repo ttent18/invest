@@ -24,9 +24,13 @@ from pathlib import Path
 
 from investment.config import SCREEN, SETTINGS, ScreenCriteria, Settings
 from investment.db import connect, record_gaps, select_cash, select_positions, select_screened
-from investment.market import MarketDataError, fetch_last_price
+from investment.market import MarketDataError, fetch_last_price, lot_size
+from investment.sizing import position_size
 
-RULE_VERSION = "v1"
+# 適用しているルールの版。rules/<この値>.md が中身。
+# 提案・取引にこの値を記録することで、あとから版ごとの成績を比べられる。
+# ルールを変えたら rules/vN.md を書いてから、ここを上げること。
+RULE_VERSION = "v2"
 OUTPUT = Path("build/context.json")
 
 
@@ -71,14 +75,63 @@ def attach_last_price(candidates: list[dict]) -> tuple[list[dict], list[tuple[st
     return priced, gaps
 
 
+def drop_unaffordable(
+    candidates: list[dict], settings: Settings
+) -> tuple[list[dict], list[dict]]:
+    """1単元すら買えない銘柄を候補から外す。戻り値は (残す候補, 外した候補)。
+
+    日本株は100株単位でしか買えない（単元）。1銘柄に投じられる金額には
+    上限があるため、株価が高い銘柄は「100株買うと上限を超える」＝買えない。
+    例: 株価2,704円 → 100株で270,400円。上限137,500円を超えるので買えない。
+
+    これをAIに渡しても、発注できない提案しか作れない。実際 2026-09-07 の
+    初回運用では、AIが41件の候補のうち5件しか調べきれないまま、
+    どちらも発注できない2銘柄を提案した。買えないものは先に外す。
+    """
+    limit = settings.total_capital * settings.max_position_pct
+    kept, dropped = [], []
+    for c in candidates:
+        unit = lot_size(c["symbol"])
+        lot_cost = float(c["last_price"]) * unit
+        if lot_cost <= limit:
+            kept.append({**c, "lot_size": unit, "max_quantity": _max_quantity(c, settings, unit)})
+        else:
+            dropped.append({**c, "lot_size": unit, "lot_cost": lot_cost})
+    if dropped:
+        print(
+            f"1単元の金額が1銘柄の上限({limit:,.0f}円)を超えるため "
+            f"{len(dropped)} 件を候補から除外しました"
+        )
+    return kept, dropped
+
+
+def _max_quantity(candidate: dict, settings: Settings, unit: int) -> int:
+    """この銘柄を最大何株まで買えるかを返す（売買単位の倍数）。
+
+    AIが「上限金額 ÷ 株価」を自分で計算すると単元未満の株数を出してしまうため、
+    正しい答えをこちらで計算して渡す。
+    """
+    price = float(candidate["last_price"])
+    return position_size(
+        settings.total_capital,
+        settings.risk_per_trade_pct,
+        settings.max_position_pct,
+        price,
+        price * (1 - settings.stop_loss_pct),
+        lot_size=unit,
+    )
+
+
 def assemble(
     candidates: list[dict],
     positions: list[dict],
     cash: dict[str, float],
     settings: Settings,
     criteria: ScreenCriteria,
+    dropped: list[dict],
 ) -> dict:
     """AIに渡す情報をまとめる。ここでは外部アクセスを一切しない。"""
+    limit = settings.total_capital * settings.max_position_pct
     return {
         "is_virtual": True,
         "rule_version": RULE_VERSION,
@@ -103,6 +156,18 @@ def assemble(
         "positions": positions,
         "can_open_new": len(positions) < settings.max_positions,
         "candidates": candidates,
+        "excluded_candidates": {
+            "reason": (
+                f"1単元（日本株は100株）の金額が1銘柄の上限 {limit:,.0f}円 を"
+                "超えるため、買えないものとして候補から外した"
+            ),
+            "count": len(dropped),
+            "symbols": [
+                {"symbol": d["symbol"], "last_price": d["last_price"],
+                 "lot_size": d["lot_size"], "lot_cost": d["lot_cost"]}
+                for d in dropped
+            ],
+        },
     }
 
 
@@ -114,12 +179,15 @@ def main() -> int:
     # 2. 株価を取る（この間、データベースには接続しない）
     priced_candidates, gaps = attach_last_price(candidates)
 
+    # 2b. 1単元すら買えない銘柄を外す（AIに調べさせても発注できないため）
+    priced_candidates, dropped = drop_unaffordable(priced_candidates, SETTINGS)
+
     # 3. 取れなかった事実を記録する（接続を開き直す）
     if gaps:
         with connect() as conn:
             record_gaps(conn, gaps)
 
-    ctx = assemble(priced_candidates, positions, cash, SETTINGS, SCREEN)
+    ctx = assemble(priced_candidates, positions, cash, SETTINGS, SCREEN, dropped)
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
     OUTPUT.write_text(json.dumps(ctx, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
     print(f"候補 {len(ctx['candidates'])} 件 / 保有 {len(ctx['positions'])} 件 → {OUTPUT}")

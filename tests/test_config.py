@@ -3,8 +3,8 @@ from investment.config import SCREEN, SETTINGS
 
 def test_settings_match_spec():
     assert SETTINGS.total_capital == 550_000
-    assert SETTINGS.max_position_pct == 0.15
-    assert SETTINGS.max_positions == 5
+    assert SETTINGS.max_position_pct == 0.25
+    assert SETTINGS.max_positions == 4
     assert SETTINGS.risk_per_trade_pct == 0.02
     assert SETTINGS.stop_loss_pct == 0.08
     assert SETTINGS.take_profit_pct == 0.22

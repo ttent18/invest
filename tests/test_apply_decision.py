@@ -8,9 +8,12 @@ from investment.jobs.apply_decision import enrich, insert_proposals, validate
 
 CTX = {
     "can_open_new": True,
-    # last_price は good() の entry_price(2450.0) と整合させてある。
+    # last_price は good() の entry_price(1200.0) と整合させてある。
     # ズレのテストは各テストの中で candidates を差し替えて行う。
-    "candidates": [{"symbol": "3993.T", "last_price": 2450.0}],
+    #
+    # 日本株は100株単位でしか買えない。1銘柄上限は 550,000円 × 25% = 137,500円
+    # なので、100株で収まる株価（1,375円以下）を基準の銘柄にしてある。
+    "candidates": [{"symbol": "3993.T", "last_price": 1200.0}],
     "rule_version": "v1",
     # 保有無し。売りの検証テストは各テストの中で positions を差し替えて行う。
     "positions": [],
@@ -21,10 +24,10 @@ def good(**overrides) -> dict:
     d = {
         "symbol": "3993.T",
         "action": "buy",
-        "entry_price": 2450.0,
-        "take_profit": 2989.0,   # +22%
-        "stop_loss": 2254.0,     # -8%
-        "quantity": 33,
+        "entry_price": 1200.0,
+        "take_profit": 1464.0,   # +22%
+        "stop_loss": 1104.0,     # -8%
+        "quantity": 100,         # 日本株の売買単位は100株
         "rationale": "決算で売上が伸びている",
         "scenario": "2〜3週間で調整前の水準に戻る想定",
         "confidence": "mid",
@@ -51,8 +54,9 @@ def test_rejects_symbol_not_in_candidates():
 
 
 def test_rejects_quantity_over_position_limit():
-    # 上限15% = 82,500円 → 2450円で33株が上限。34株は超過
-    errors = validate(good(quantity=34), CTX, SETTINGS)
+    # 上限25% = 137,500円 → 1200円なら114株買えるが、100株単位なので上限は100株。
+    # 200株は上限を超える
+    errors = validate(good(quantity=200), CTX, SETTINGS)
     assert any("上限" in e for e in errors)
 
 
@@ -83,41 +87,41 @@ def test_rejects_empty_rationale():
 
 
 def test_accepts_entry_price_matching_last_price():
-    # entry_price(2450.0) は candidates の last_price(2450.0) と一致
+    # entry_price(1200.0) は candidates の last_price(1200.0) と一致
     assert validate(good(), CTX, SETTINGS) == []
 
 
 def test_accepts_entry_price_at_plus_10_percent_boundary():
-    last_price = 2450.0
-    entry = last_price * 1.10  # 2695.0 ちょうど。境界は許容する
+    last_price = 1200.0
+    entry = last_price * 1.10  # 1320.0 ちょうど。境界は許容する
     # sl/tp も entry からの -8%/+22% に合わせて計算し直す(順序制約を壊さないため)
     d = good(
         entry_price=entry,
         take_profit=entry * 1.22,
         stop_loss=entry * 0.92,
-        # 上限15% = 82,500円 → 2695円で30.6株 → 30株が上限
-        quantity=30,
+        # 上限137,500円 → 1320円で104株。100株単位なので100株が上限
+        quantity=100,
     )
     assert validate(d, CTX, SETTINGS) == []
 
 
 def test_accepts_entry_price_at_minus_10_percent_boundary():
-    last_price = 2450.0
-    entry = last_price * 0.90  # 2205.0 ちょうど。境界は許容する
+    last_price = 1200.0
+    entry = last_price * 0.90  # 1080.0 ちょうど。境界は許容する
     d = good(
         entry_price=entry,
         take_profit=entry * 1.22,
         stop_loss=entry * 0.92,
-        # 上限15% = 82,500円 → 2205円で37.4株 → 37株が上限
-        quantity=37,
+        # 上限137,500円 → 1080円で127株。100株単位なので100株が上限
+        quantity=100,
     )
     assert validate(d, CTX, SETTINGS) == []
 
 
 def test_rejects_entry_price_far_from_last_price():
-    # 実際の株価は2450円なのに、買値100円は明らかにおかしい(捏造や勘違いの疑い)
+    # 実際の株価は1200円なのに、買値100円は明らかにおかしい(捏造や勘違いの疑い)
     errors = validate(good(entry_price=100.0), CTX, SETTINGS)
-    assert any("2450" in e and "100" in e for e in errors)
+    assert any("1200" in e and "100" in e for e in errors)
 
 
 def test_rejects_when_last_price_missing_from_candidate():
@@ -168,8 +172,8 @@ def good_sell(**overrides) -> dict:
 
 def test_accepts_sell_of_exact_held_quantity():
     # 境界: 保有株数ちょうどの売りは通る
-    ctx = dict(CTX, positions=[{"symbol": "3993.T", "quantity": 10}])
-    assert validate(good_sell(quantity=10), ctx, SETTINGS) == []
+    ctx = dict(CTX, positions=[{"symbol": "3993.T", "quantity": 100}])
+    assert validate(good_sell(quantity=100), ctx, SETTINGS) == []
 
 
 def test_rejects_sell_of_symbol_not_held():
@@ -179,10 +183,10 @@ def test_rejects_sell_of_symbol_not_held():
 
 
 def test_rejects_sell_exceeding_held_quantity():
-    ctx = dict(CTX, positions=[{"symbol": "3993.T", "quantity": 5}])
-    errors = validate(good_sell(quantity=10), ctx, SETTINGS)
-    # 却下メッセージに保有株数(5)と売却しようとした株数(10)の両方が含まれる
-    assert any("5" in e and "10" in e for e in errors)
+    ctx = dict(CTX, positions=[{"symbol": "3993.T", "quantity": 100}])
+    errors = validate(good_sell(quantity=200), ctx, SETTINGS)
+    # 却下メッセージに保有株数(100)と売却しようとした株数(200)の両方が含まれる
+    assert any("100" in e and "200" in e for e in errors)
 
 
 # --- I1: 型が誤ったフィールドを渡しても例外を投げず、却下メッセージを返すこと ---
@@ -243,21 +247,21 @@ def test_rejects_negative_quantity_on_sell():
 
 
 def test_rejects_non_integer_quantity():
-    # 33.9株のような端数は、切り捨てて33として静かに通してしまうと、
-    # 検証した値(33)と decision に残った値(33.9)が食い違う原因になる。
+    # 100.9株のような端数は、切り捨てて100として静かに通してしまうと、
+    # 検証した値(100)と decision に残った値(100.9)が食い違う原因になる。
     # 整数でなければそもそも却下する。
-    errors = validate(good(quantity=33.9), CTX, SETTINGS)
+    errors = validate(good(quantity=100.9), CTX, SETTINGS)
     assert any("quantity" in e and "整数" in e for e in errors)
 
 
 def test_normalizes_whole_number_float_quantity_to_int():
-    # quantity=33.0 (端数のない float) は受理してよいが、検証後に decision
-    # 自体が持つ値は int の 33 に揃える。insert_proposals はこの decision の
+    # quantity=100.0 (端数のない float) は受理してよいが、検証後に decision
+    # 自体が持つ値は int の 100 に揃える。insert_proposals はこの decision の
     # 値をそのまま使うため、検証した値と保存される値を一致させるために必要。
-    d = good(quantity=33.0)
+    d = good(quantity=100.0)
     errors = validate(d, CTX, SETTINGS)
     assert errors == []
-    assert d["quantity"] == 33
+    assert d["quantity"] == 100
     assert isinstance(d["quantity"], int)
 
 
@@ -471,3 +475,47 @@ def test_record_rejections_saves_to_data_gaps_table(conn):
     assert rows[0]["scope"] == "proposal_rejected:9999.T"
     assert "エラーA" in rows[0]["detail"]
     assert "エラーB" in rows[0]["detail"]
+
+
+# --- 売買単位（単元株）の検証 -----------------------------------------------
+
+
+def test_rejects_quantity_that_is_not_a_multiple_of_the_lot_size():
+    """日本株で37株のような単元未満の株数は注文できないので却下する。
+
+    AI は「上限金額 ÷ 株価」で株数を出しがちだが、日本株は100株単位でしか
+    注文できない。この検証が無いと、実際には発注できない提案が通ってしまう。
+    """
+    errors = validate(good(quantity=137), CTX, SETTINGS)
+    assert any("100株単位" in e for e in errors)
+
+
+def test_rejects_buy_when_one_lot_exceeds_the_position_limit():
+    """1単元（100株）ですら上限金額を超える銘柄は買えないので却下する。
+
+    株価2,704円だと100株で270,400円になり、1銘柄上限137,500円を超える。
+    実際に 2026-09-07 の初回運用で AI が提案し、発注できなかったケース。
+    """
+    ctx = dict(CTX, candidates=[{"symbol": "3723.T", "last_price": 2704.0}])
+    d = good(
+        symbol="3723.T",
+        entry_price=2704.0,
+        take_profit=2704.0 * 1.22,
+        stop_loss=2704.0 * 0.92,
+        quantity=100,
+    )
+    errors = validate(d, ctx, SETTINGS)
+    assert any("上限" in e for e in errors)
+
+
+def test_us_stocks_are_not_subject_to_the_100_share_unit():
+    """米国株は1株から買えるので、単元の制約をかけない。"""
+    ctx = dict(CTX, candidates=[{"symbol": "AAPL", "last_price": 200.0}])
+    d = good(
+        symbol="AAPL",
+        entry_price=200.0,
+        take_profit=244.0,
+        stop_loss=184.0,
+        quantity=137,  # 日本株なら却下される端数だが、米国株では正当
+    )
+    assert validate(d, ctx, SETTINGS) == []
