@@ -57,3 +57,25 @@ def test_position_size_returns_zero_when_one_share_is_too_expensive():
 def test_position_size_rejects_invalid_stop():
     with pytest.raises(ValueError):
         position_size(550_000, 0.02, 0.15, 2450, 2450)
+
+
+def test_position_size_handles_float_rounding_on_risk_side():
+    # capital*risk_pct=1000, loss_per_share=entry-stop_loss=66.66666666666667(=200/3)
+    # 数学的な商は 1000 / (200/3) = 15 ちょうど。
+    # だがIEEE-754の割り算では 14.999999999999998 になり、
+    # math.floor をそのまま掛けると 14 に切り捨てられてしまう（1株少なく買う）。
+    # 上限側(by_cap)は広く取り、リスク側(by_risk)が効くようにする。
+    entry = 100.0
+    stop_loss = entry - 66.66666666666667
+    assert position_size(50_000, 0.02, 0.99, entry, stop_loss) == 15
+
+
+def test_position_size_handles_float_rounding_on_cap_side():
+    # capital*max_position_pct=1000, entry=66.66666666666667(=200/3)
+    # 数学的な商は 1000 / (200/3) = 15 ちょうど。
+    # だがIEEE-754の割り算では 14.999999999999998 になり、
+    # math.floor をそのまま掛けると 14 に切り捨てられてしまう。
+    # リスク側(by_risk)は広く取り、上限側(by_cap)が効くようにする。
+    entry = 66.66666666666667
+    stop_loss = entry - 1
+    assert position_size(50_000, 1.0, 0.02, entry, stop_loss) == 15

@@ -38,7 +38,12 @@ def position_size(
     if entry <= stop_loss:
         raise ValueError("stop_loss は entry より小さい必要があります")
 
+    # IEEE-754の浮動小数除算は、数学的にちょうど整数になる商でも
+    # わずかに下回る値（例: 15.0 のはずが 14.999999999999998）を返すことがある。
+    # math.floor をそのまま掛けると、この誤差のせいで1株少なく買ってしまう。
+    # 小数9桁で丸めてから切り捨てることで、正当な整数の商はそのまま整数として扱い、
+    # 本当に端数がある商（例: 14.9）の切り捨て結果には影響を与えない。
     loss_per_share = entry - stop_loss
-    by_risk = math.floor(capital * risk_pct / loss_per_share)
-    by_cap = math.floor(capital * max_position_pct / entry)
+    by_risk = math.floor(round(capital * risk_pct / loss_per_share, 9))
+    by_cap = math.floor(round(capital * max_position_pct / entry, 9))
     return max(0, min(by_risk, by_cap))
