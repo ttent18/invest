@@ -124,6 +124,24 @@ def record_gap(conn, scope: str, detail: str) -> None:
     record_gaps(conn, [(scope, detail)])
 
 
+def select_push_subscriptions(conn) -> list[dict]:
+    """通知の宛先を返す。"""
+    with conn.cursor() as cur:
+        cur.execute("SELECT endpoint, p256dh, auth FROM push_subscriptions ORDER BY id")
+        return [dict(r) for r in cur.fetchall()]
+
+
+def delete_push_subscription(conn, endpoint: str) -> None:
+    """失効した宛先を消す。
+
+    通知サーバーが「その宛先はもう無い」と答えたときだけ呼ぶ。
+    残したまま送り続けると毎回失敗が記録され、本当の失敗が埋もれる。
+    """
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM push_subscriptions WHERE endpoint = %s", (endpoint,))
+    conn.commit()
+
+
 def select_positions(conn) -> list[dict]:
     """現在の保有を返す。"""
     with conn.cursor() as cur:
