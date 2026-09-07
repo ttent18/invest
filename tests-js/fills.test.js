@@ -178,6 +178,58 @@ describe("POST /api/fills", () => {
     expect(insertCall.query).toContain(INSERT_COLUMNS);
   });
 
+  // --- 列名の並びと束縛値の並びが1対1で対応しているかの確認（持ち越し2） ---
+  //
+  // これまでのテストは「列名リストの文字列」と「個々の束縛値」を別々に
+  // 確認していたが、両者の対応関係までは見ていなかった。レビューで
+  // 実際に確かめたところ、列名リスト（INSERT INTO fills (..., symbol,
+  // side, ...)）はそのままに、VALUES 側だけ ${side}, ${symbol} と
+  // 入れ替えても、既存の15件は全部グリーンのままだった。
+  //
+  // quantity と price の束縛が入れ替わると「899株を100円で買った」が
+  // 黙って記録され、GitHub Actions 上の Python がそのまま現金と保有に
+  // 反映してしまう。お金が直接動く欠陥なので、ここで列名ごとに
+  // 束縛値を突き合わせて確認する。
+  function parseInsertColumns(query) {
+    const match = query.match(/INSERT INTO fills \(([^)]+)\)/);
+    if (!match) throw new Error("INSERT INTO fills の列名リストが見つかりませんでした");
+    return match[1].split(",").map((c) => c.trim());
+  }
+
+  it("INSERTの列名と束縛値が1対1で対応していること（列名はそのままVALUES側だけ入れ替える不具合を検知する）", async () => {
+    vi.resetModules();
+    const getSql = mockNeon((query) => {
+      if (query.includes("SELECT id FROM proposals")) return [{ id: 3 }];
+      if (query.includes("INSERT INTO fills")) return [{ id: 1, symbol: "156A.T", side: "buy", quantity: 100, price: "899", fee: "0", traded_at: null, recorded_at: "now" }];
+      throw new Error(`想定していない問い合わせ: ${query}`);
+    });
+    const { onRequestPost } = await import("../functions/api/fills.js");
+
+    const body = goodBody(); // proposal_id:3, symbol:"156A.T", side:"buy", quantity:100, price:899, client_key:"k1"
+    await onRequestPost({ request: req(body), env: { DATABASE_URL: "postgres://dummy" } });
+
+    const insertCall = findCall(getSql(), "INSERT INTO fills");
+    const columns = parseInsertColumns(insertCall.query);
+    const values = insertCall.values;
+    expect(columns.length).toBe(values.length);
+
+    // 列名 → 実際に束縛された値、を列名ごとに1つずつ確かめる。
+    // （列の位置に依存せず、query に書かれている列名の並びをそのまま使う
+    // ので、列の並び替え自体は許容しつつ、名前と値の対応がずれていないか
+    // を見る）
+    const byColumn = Object.fromEntries(columns.map((col, i) => [col, values[i]]));
+
+    expect(byColumn.symbol).toBe(body.symbol); // "156A.T"
+    expect(byColumn.side).toBe(body.side); // "buy"
+    expect(byColumn.quantity).toBe(body.quantity); // 100
+    expect(byColumn.price).toBe(body.price); // 899
+    expect(byColumn.proposal_id).toBe(body.proposal_id); // 3
+    expect(byColumn.currency).toBe("JPY");
+    expect(byColumn.fee).toBe(0);
+    expect(byColumn.traded_at).toBeNull();
+    expect(byColumn.client_key).toBe(body.client_key); // "k1"
+  });
+
   it("日本株（.T終わり）なら currency に JPY が束縛されること", async () => {
     vi.resetModules();
     const getSql = mockNeon((query) => {

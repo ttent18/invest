@@ -90,3 +90,30 @@ export function validateFill(fill) {
 
   return errors;
 }
+
+// POST /api/subscribe が受け取った内容の検証。
+//
+// ブラウザの PushSubscription.toJSON() がそのまま送られてくる想定。
+// 「通知を送る宛先として最低限成立しているか」だけを見る。
+// endpoint が無い・鍵が無いものをそのままデータベースに入れると、
+// あとで通知を送ろうとしたときに毎回失敗する行が残ってしまう。
+export function validateSubscription(subscription) {
+  const errors = [];
+  const { endpoint, keys } = subscription ?? {};
+
+  if (typeof endpoint !== "string" || !endpoint.startsWith("https://")) {
+    errors.push("通知の登録に必要な情報が足りません（宛先が正しくありません）");
+  }
+
+  // keys そのものが無くても（{} 扱いにして）落ちないようにする。
+  const { p256dh, auth } = keys ?? {};
+
+  if (typeof p256dh !== "string" || p256dh.trim() === "") {
+    errors.push("通知の登録に必要な情報が足りません（鍵の情報が足りません）");
+  }
+  if (typeof auth !== "string" || auth.trim() === "") {
+    errors.push("通知の登録に必要な情報が足りません（鍵の情報が足りません）");
+  }
+
+  return errors;
+}
