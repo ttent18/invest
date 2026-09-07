@@ -109,10 +109,10 @@ export function validateSubscription(subscription) {
   const { p256dh, auth } = keys ?? {};
 
   if (typeof p256dh !== "string" || p256dh.trim() === "") {
-    errors.push("通知の登録に必要な情報が足りません（鍵の情報が足りません）");
+    errors.push("通知の登録に必要な情報が足りません（暗号化用の鍵が足りません）");
   }
   if (typeof auth !== "string" || auth.trim() === "") {
-    errors.push("通知の登録に必要な情報が足りません（鍵の情報が足りません）");
+    errors.push("通知の登録に必要な情報が足りません（確認用の鍵が足りません）");
   }
 
   return errors;

@@ -26,7 +26,12 @@ export async function onRequestPost({ request, env }) {
   }
 
   const { endpoint, keys } = body;
-  const { p256dh, auth } = keys;
+  // 検証（validateSubscription）は p256dh.trim() / auth.trim() で
+  // 「空でないか」を判定している。ここで trim せずに保存すると、
+  // 前後に空白が付いたままの鍵が push_subscriptions に入り、
+  // 通知の送信（暗号化）が黙って失敗し続ける（Minor 3）。
+  const p256dh = keys.p256dh.trim();
+  const auth = keys.auth.trim();
 
   try {
     const sql = db(env);
