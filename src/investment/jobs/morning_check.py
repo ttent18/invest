@@ -164,7 +164,20 @@ def run(positions: list[dict], conn, today: date) -> tuple[list[dict], int, int]
             pass
 
     hits = detect_hits(positions, ranges)
-    save_last_prices(conn, last_prices)
+
+    # 株価の保存に失敗しても、損切り・利確への到達を知らせるほうを止めない。
+    # 保存できたかどうかは画面の見た目の話で、通知は「あなたが動く必要がある」
+    # という知らせ。軽いほうの失敗で重いほうを巻き添えにしない。
+    # 失敗した事実は記録に残すので、黙って消えることはない。
+    try:
+        save_last_prices(conn, last_prices)
+    except Exception as exc:  # noqa: BLE001 - 理由は上のコメントを参照
+        record_gap(
+            conn,
+            scope="price:save_failed",
+            detail=f"最後に見た株価を保存できませんでした: {exc}",
+        )
+
     return hits, failed, attempted
 
 

@@ -463,3 +463,40 @@ def test_main_notifies_when_a_position_passed_its_deadline():
         main()
 
     notify.assert_called_once()
+
+
+def test_run_returns_hits_even_when_save_last_prices_fails():
+    """株価の保存に失敗しても、損切り・利確への到達は返すこと。
+
+    保存はあくまで「画面の見た目の話」であり、通知（ユーザーが動く必要が
+    ある知らせ）を巻き添えにしない。失敗は record_gap に記録される。
+    """
+    def fake_range(symbol, start, end):
+        # 3993.T が損切りに到達した値動きを返す
+        if symbol == "3993.T":
+            return (2500.0, 2200.0)  # 安値が損切り(2254)を下回った
+        return (200.0, 190.0)
+
+    save_error = ValueError("保存に失敗しました")
+
+    with (
+        patch("investment.jobs.morning_check.fetch_range", side_effect=fake_range),
+        patch("investment.jobs.morning_check.fetch_last_price", return_value=200.0),
+        patch("investment.jobs.morning_check.save_last_prices", side_effect=save_error),
+        patch("investment.jobs.morning_check.record_gap") as gap,
+    ):
+        hits, failed, attempted = run(RUN_POSITIONS, conn=None, today=TODAY)
+
+    # 損切りに到達した1件が返ること（例外は投げられない）
+    assert len(hits) == 1
+    assert hits[0]["symbol"] == "3993.T"
+    assert hits[0]["kind"] == "stop_loss"
+    # failed は値動き取得の失敗を数えているので、保存失敗は含まない
+    assert failed == 0
+    # attempted は値動き取得を試みた件数
+    assert attempted == 2
+    # 保存の失敗は記録されている
+    gap.assert_called_once()
+    call_kwargs = gap.call_args.kwargs
+    assert call_kwargs["scope"] == "price:save_failed"
+    assert "保存できませんでした" in call_kwargs["detail"]
