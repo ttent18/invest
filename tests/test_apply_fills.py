@@ -1,7 +1,7 @@
 """申告を反映するジョブのテスト。実際のデータベースを使う。"""
 
 import os
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -184,10 +184,14 @@ def test_a_failed_proposal_update_leaves_no_trade_and_no_position_either(conn):
             550_000,
         )
 
+        with conn.cursor() as cur:
+            cur.execute("SELECT recorded_at FROM fills WHERE id = %s", (fid,))
+            recorded_at = cur.fetchone()["recorded_at"]
+
         with pytest.raises(Exception):  # noqa: B017 - トリガーが投げる例外を確認したいだけ
             save_fill_result(
                 conn, fid, result.position, result.cash_delta, result.trade,
-                "JPY", proposal_id=pid,
+                "JPY", recorded_at, proposal_id=pid,
             )
         conn.rollback()  # ジョブ本体（run）が失敗時に必ず行うのと同じ後始末
 
@@ -263,6 +267,68 @@ def test_buying_more_of_the_same_position_does_not_change_when_it_was_first_open
     assert row["quantity"] == 150
 
 
+# --- 保有日数・取引の日時は申告した時刻を使う（指摘4） -----------------------
+# NOW()（ジョブが実行された時刻）ではなく fills.recorded_at（利用者が申告した
+# 時刻）を使う。月曜の場中に買っても NOW() を使うとジョブが翌朝に走るぶん
+# opened_at が翌朝になり、保有日数がずれる。回転枠の期限判定や枠ごとの成績
+# （この計画の目的そのもの）を歪める。
+
+
+def test_buy_uses_the_recorded_time_not_the_job_run_time(conn):
+    pid = _proposal(conn, "1111.T", "じっくり")
+    fid = _fill(conn, proposal_id=pid, symbol="1111.T", side="buy", quantity=100, price=900)
+    with conn.cursor() as cur:
+        # 申告した時刻を、ジョブの実行日(2026-09-08)とはっきり違う日にする
+        cur.execute(
+            "UPDATE fills SET recorded_at = '2026-09-01T10:00:00+09' WHERE id = %s",
+            (fid,),
+        )
+    conn.commit()
+
+    run(conn, today=date(2026, 9, 8))
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT opened_at FROM positions WHERE symbol = '1111.T'")
+        opened_at = cur.fetchone()["opened_at"]
+        cur.execute(
+            "SELECT executed_at FROM trades WHERE symbol = '1111.T' AND side = 'buy'"
+        )
+        executed_at = cur.fetchone()["executed_at"]
+
+    expected = datetime(2026, 9, 1, 10, 0, 0, tzinfo=timezone(timedelta(hours=9)))
+    assert opened_at == expected
+    assert executed_at == expected
+
+
+def test_sell_uses_the_recorded_time_for_the_trade_but_not_for_holding_days(conn):
+    """売りの取引日時も申告時刻を使うこと（holding_days自体は計画2-Bへ持ち越し）。"""
+    pid = _proposal(conn, "1111.T", "じっくり")
+    _fill(conn, proposal_id=pid, symbol="1111.T", side="buy", quantity=100, price=900)
+    run(conn, today=date(2026, 9, 1))
+
+    pid_sell = _proposal(conn, "1111.T", "じっくり", action="sell")
+    fid_sell = _fill(
+        conn, proposal_id=pid_sell, symbol="1111.T", side="sell", quantity=100, price=1100
+    )
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE fills SET recorded_at = '2026-09-10T15:00:00+09' WHERE id = %s",
+            (fid_sell,),
+        )
+    conn.commit()
+
+    run(conn, today=date(2026, 9, 30))
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT executed_at FROM trades WHERE symbol = '1111.T' AND side = 'sell'"
+        )
+        executed_at = cur.fetchone()["executed_at"]
+
+    expected = datetime(2026, 9, 10, 15, 0, 0, tzinfo=timezone(timedelta(hours=9)))
+    assert executed_at == expected
+
+
 def test_a_fill_that_cannot_be_applied_is_kept_with_its_reason(conn):
     """反映できない申告を黙って消さないこと。"""
     fid = _fill(conn, symbol="9999.T", side="sell", quantity=100, price=900)
@@ -295,6 +361,60 @@ def test_a_buy_without_a_proposal_is_rejected(conn):
     with conn.cursor() as cur:
         cur.execute("SELECT apply_error FROM fills WHERE id = %s", (fid,))
         assert "枠" in cur.fetchone()["apply_error"]
+
+
+# --- 申告と提案の突き合わせ（指摘3） -----------------------------------------
+# fills.symbol と proposals.symbol が一致するか、その提案が既に taken か、
+# の2つを確かめずに反映すると、二重売買の入口になる。
+
+
+def test_a_fill_whose_symbol_does_not_match_the_linked_proposal_is_rejected(conn):
+    """画面で違うカードを押した場合を想定する。
+
+    A社の買いをB社の提案に紐づけて記録すると、そのまま反映すればB社の
+    提案が「実行した」ことになり、A社の提案は pending のまま残って
+    もう一度買う提案として出てしまう。反映そのものを止める必要がある。
+    """
+    pid = _proposal(conn, "2222.T", "じっくり")  # B社の提案
+    fid = _fill(conn, proposal_id=pid, symbol="1111.T", side="buy", quantity=100, price=900)  # A社の申告
+
+    assert run(conn, today=date(2026, 9, 8)) == (0, 1)
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT applied_at, apply_error FROM fills WHERE id = %s", (fid,))
+        row = cur.fetchone()
+    assert row["applied_at"] is None
+    assert "一致しません" in row["apply_error"]
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT outcome FROM proposals WHERE id = %s", (pid,))
+        assert cur.fetchone()["outcome"] == "pending"  # B社の提案は taken になっていない
+
+    assert _state(conn)["positions"] == []  # A社の保有も作られていない
+
+
+def test_a_second_fill_for_an_already_taken_proposal_is_rejected(conn):
+    """同じ提案に対する申告が2件あったら、2件目は反映しないこと。
+
+    1件目の申告で提案は taken になる。2件目をそのまま反映すると、
+    同じ買いが二重に保有・現金へ反映されてしまう。
+    """
+    pid = _proposal(conn, "1111.T", "じっくり")
+    _fill(conn, proposal_id=pid, symbol="1111.T", side="buy", quantity=100, price=900)
+    assert run(conn, today=date(2026, 9, 8)) == (1, 0)
+
+    fid2 = _fill(conn, proposal_id=pid, symbol="1111.T", side="buy", quantity=100, price=900)
+    assert run(conn, today=date(2026, 9, 9)) == (0, 1)
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT applied_at, apply_error FROM fills WHERE id = %s", (fid2,))
+        row = cur.fetchone()
+    assert row["applied_at"] is None
+    assert "既に実行済み" in row["apply_error"]
+
+    s = _state(conn)
+    assert len(s["positions"]) == 1
+    assert s["positions"][0]["quantity"] == 100  # 二重に反映されていない
 
 
 def test_applying_the_same_fill_twice_does_not_double_count(conn):

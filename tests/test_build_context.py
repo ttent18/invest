@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from unittest.mock import patch
 
@@ -6,6 +7,7 @@ from investment.jobs.build_context import (
     RULE_VERSION,
     assemble,
     attach_last_price,
+    drop_already_held,
     drop_unaffordable,
     main,
     read_inputs,
@@ -174,6 +176,104 @@ def test_main_does_not_reopen_the_connection_when_nothing_failed(tmp_path):
 
     assert calls == ["connect"]
     record.assert_not_called()
+
+
+# --- 既に保有している銘柄を候補から外す（指摘1-a） ---------------------------
+# 保有中の銘柄がまた候補に出ると、AIはそれを「買い増し」として提案できて
+# しまう。買い増すと、SBIに置いてある逆指値（この値段まで下がったら売る、
+# という予約注文）が古い値のままになり、実際の損切り価格とずれる。
+
+
+def test_drop_already_held_removes_candidates_that_are_currently_held():
+    candidates = [
+        {"symbol": "1111.T", "last_price": 1200.0},
+        {"symbol": "2222.T", "last_price": 900.0},
+    ]
+    positions = [{"symbol": "2222.T", "quantity": 100, "bucket": "じっくり"}]
+
+    kept, dropped = drop_already_held(candidates, positions)
+
+    assert [c["symbol"] for c in kept] == ["1111.T"]
+    assert [d["symbol"] for d in dropped] == ["2222.T"]
+
+
+def test_drop_already_held_keeps_everything_when_nothing_is_held():
+    candidates = [{"symbol": "1111.T", "last_price": 1200.0}]
+    kept, dropped = drop_already_held(candidates, positions=[])
+    assert kept == candidates
+    assert dropped == []
+
+
+def test_assemble_records_the_symbols_excluded_for_being_already_held():
+    """外した事実を黙って消さず、件数と銘柄をコンテキストに残すこと。"""
+    held_dropped = [{"symbol": "2222.T", "last_price": 900.0}]
+    ctx = assemble(
+        [], [], {"JPY": 550_000}, SETTINGS, SCREEN, dropped=[], capital=550_000.0,
+        held_dropped=held_dropped,
+    )
+
+    assert ctx["excluded_held_candidates"]["count"] == 1
+    assert "2222.T" in ctx["excluded_held_candidates"]["symbols"]
+    assert "保有" in ctx["excluded_held_candidates"]["reason"]
+
+
+def test_assemble_reports_no_held_exclusions_when_not_given():
+    ctx = assemble([], [], {"JPY": 550_000}, SETTINGS, SCREEN, dropped=[], capital=550_000.0)
+    assert ctx["excluded_held_candidates"]["count"] == 0
+    assert ctx["excluded_held_candidates"]["symbols"] == []
+
+
+def test_main_excludes_symbols_already_held_from_the_candidates(tmp_path):
+    """本番の経路（main）で、保有中の銘柄が候補から消えること。"""
+    with (
+        patch("investment.jobs.build_context.connect"),
+        patch(
+            "investment.jobs.build_context.select_screened",
+            return_value=[{"symbol": "1111.T"}, {"symbol": "2222.T"}],
+        ),
+        patch(
+            "investment.jobs.build_context.select_positions",
+            return_value=[{"symbol": "2222.T", "bucket": "じっくり"}],
+        ),
+        patch("investment.jobs.build_context.select_cash", return_value={"JPY": 550_000}),
+        patch("investment.jobs.build_context.select_capital", return_value=550_000.0),
+        patch("investment.jobs.build_context.fetch_last_price", return_value=1200.0),
+        patch("investment.jobs.build_context.record_gaps") as record,
+        patch("investment.jobs.build_context.OUTPUT", tmp_path / "context.json"),
+    ):
+        assert main() == 0
+
+    ctx = json.loads((tmp_path / "context.json").read_text(encoding="utf-8"))
+    assert [c["symbol"] for c in ctx["candidates"]] == ["1111.T"]
+    assert ctx["excluded_held_candidates"]["symbols"] == ["2222.T"]
+
+    recorded = record.call_args.args[1]
+    assert any(scope == "candidate_already_held:2222.T" for scope, _detail in recorded)
+
+
+# --- 総資金が0円のとき、静かに全候補が除外されて終わらないこと（指摘2） -------
+# cash に JPY の行が無い・消えた場合、select_capital は黙って0.0を返す。
+# 気づかずに進むと、1銘柄の上限が0円になって全候補が除外されるだけで
+# 正常終了してしまい、「今日は買える候補が無かった」と区別が付かなくなる。
+
+
+def test_main_stops_with_error_code_when_total_capital_is_zero(tmp_path):
+    with (
+        patch("investment.jobs.build_context.connect"),
+        patch("investment.jobs.build_context.select_screened", return_value=[]),
+        patch("investment.jobs.build_context.select_positions", return_value=[]),
+        patch("investment.jobs.build_context.select_cash", return_value={"JPY": 0}),
+        patch("investment.jobs.build_context.select_capital", return_value=0.0),
+        patch("investment.jobs.build_context.record_gap") as gap,
+        patch("investment.jobs.build_context.OUTPUT", tmp_path / "context.json"),
+    ):
+        code = main()
+
+    assert code == 1
+    gap.assert_called_once()
+    assert gap.call_args.kwargs["scope"] == "capital:zero"
+    assert "総資金" in gap.call_args.kwargs["detail"]
+    assert not (tmp_path / "context.json").exists()
 
 
 # --- 100株単位で買えない銘柄を候補から外す ----------------------------------

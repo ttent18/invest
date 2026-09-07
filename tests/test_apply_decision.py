@@ -146,6 +146,36 @@ def test_rejects_when_last_price_missing_from_candidate():
     assert any("last_price" in e for e in errors)
 
 
+# --- 買い増しの経路を塞ぐ（指摘1-b） -----------------------------------------
+# build_context.py は保有中の銘柄を候補から外す（指摘1-a）が、ここでも独立に
+# 確かめる。買い増しを通してしまうと、SBIに置いてある逆指値（この値段まで
+# 下がったら売る、という予約注文）が古い値のままになり、実際の損切り価格と
+# ずれる。1銘柄あたりの上限や枠の数え方も、買い増しは正しく数えられない。
+
+
+def test_rejects_a_buy_of_an_already_held_symbol():
+    ctx = dict(CTX, positions=[{"symbol": "3993.T", "quantity": 100, "bucket": "じっくり"}])
+    errors = validate(good(), ctx, SETTINGS, capital=550_000.0)
+    assert any("既に保有" in e for e in errors), errors
+
+
+def test_accepts_a_buy_of_a_symbol_not_currently_held():
+    # 保有に別の銘柄が入っていても、その銘柄自体を買うのは正当
+    ctx = dict(CTX, positions=[{"symbol": "9999.T", "quantity": 100, "bucket": "じっくり"}])
+    assert validate(good(), ctx, SETTINGS, capital=550_000.0) == []
+
+
+def test_missing_positions_key_does_not_raise_for_a_buy():
+    # ctx に positions が無い場合でも例外を投げず、既に保有している扱いにしない
+    ctx = {
+        "can_open_new": True,
+        "candidates": [{"symbol": "3993.T", "last_price": 1200.0}],
+        "rule_version": "v1",
+    }
+    errors = validate(good(), ctx, SETTINGS, capital=550_000.0)
+    assert not any("既に保有" in e for e in errors), errors
+
+
 # --- rule_version: ctx の値がそのまま記録されること(AIの出力やハードコードに
 # 依存しない)を確認するテスト ---
 
@@ -1108,6 +1138,39 @@ def test_main_notifies_when_there_are_proposals(tmp_path, monkeypatch):
 
     notify.assert_called_once()
     assert "1" in notify.call_args.kwargs["title"]
+
+
+# --- 総資金が0円のとき、誰も気づけないまま止まらないこと（指摘2） -----------
+# cash に JPY の行が無い・消えた場合、select_capital は黙って0.0を返す。
+# 気づかずに進むと、1銘柄の上限が0円になって全提案が却下され、採用0件の日は
+# 通知も飛ばないため、「今日は買えるものが無かった」ようにしか見えないまま、
+# 仕組み全体が誰も気づけないまま止まり続ける。
+
+
+def test_main_stops_with_error_code_when_total_capital_is_zero(tmp_path, monkeypatch):
+    """総資金が0円なら、記録を残してエラー終了すること。
+
+    build/context.json や build/decision.json をあえて用意しない。
+    総資金の確認がこれらのファイルを読むより前に行われることを、
+    ファイルが無くても main() が例外を投げずに止まることで確認する。
+    """
+    monkeypatch.chdir(tmp_path)
+
+    with (
+        patch("investment.jobs.apply_decision.connect"),
+        patch("investment.jobs.apply_decision.select_capital", return_value=0.0),
+        patch("investment.jobs.apply_decision.record_gap") as gap,
+        patch("investment.jobs.apply_decision.process") as process,
+        patch("investment.jobs.apply_decision.notify_send") as notify,
+    ):
+        code = main()
+
+    assert code == 1
+    gap.assert_called_once()
+    assert gap.call_args.kwargs["scope"] == "capital:zero"
+    assert "総資金" in gap.call_args.kwargs["detail"]
+    process.assert_not_called()
+    notify.assert_not_called()
 
 
 def test_main_does_not_notify_when_there_are_no_proposals(tmp_path, monkeypatch):

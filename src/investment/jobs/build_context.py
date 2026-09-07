@@ -26,6 +26,7 @@ from pathlib import Path
 from investment.config import BUCKETS, MAX_POSITIONS, SCREEN, SETTINGS, ScreenCriteria, Settings
 from investment.db import (
     connect,
+    record_gap,
     record_gaps,
     select_capital,
     select_cash,
@@ -82,6 +83,35 @@ def attach_last_price(candidates: list[dict]) -> tuple[list[dict], list[tuple[st
         print(f"株価が取れなかったため {len(gaps)} 件を候補から除外しました")
 
     return priced, gaps
+
+
+def drop_already_held(
+    candidates: list[dict], positions: list[dict]
+) -> tuple[list[dict], list[dict]]:
+    """既に保有している銘柄を候補から外す。戻り値は (残す候補, 外した候補)。
+
+    保有中の銘柄が翌日また候補に出ると、AIはそれを「買い増し」として
+    提案できてしまう。買い増すと、investment.fills.apply_buy が平均取得
+    単価を計算し直し、そこから利確・損切りの価格を引き直す。しかし
+    SBIに実際に置いてある逆指値（この値段まで下がったら売る、という
+    予約注文）は古い値のままで、誰も「置き直してください」と言わない。
+    以後 morning_check は実在しない注文の価格で「売れた可能性」を
+    判定し続けることになる。
+
+    そもそも候補に出さなければ、AIがその提案をする余地自体が無くなる
+    （apply_decision.validate() でも同じ内容を独立に確かめており、
+    ここは一段目の守りにあたる）。
+    """
+    held = {p["symbol"] for p in positions}
+    kept, dropped = [], []
+    for c in candidates:
+        if c["symbol"] in held:
+            dropped.append(c)
+        else:
+            kept.append(c)
+    if dropped:
+        print(f"既に保有している銘柄のため {len(dropped)} 件を候補から除外しました")
+    return kept, dropped
 
 
 def drop_unaffordable(
@@ -194,6 +224,7 @@ def assemble(
     criteria: ScreenCriteria,
     dropped: list[dict],
     capital: float,
+    held_dropped: list[dict] | None = None,
 ) -> dict:
     """AIに渡す情報をまとめる。ここでは外部アクセスを一切しない。"""
     limit = capital * settings.max_position_pct
@@ -252,6 +283,19 @@ def assemble(
                 for d in dropped
             ],
         },
+        # 買い増しの提案自体をさせないため、既に保有している銘柄は候補に
+        # 出す前に外している（drop_already_held）。外した事実を黙って
+        # 捨てず、上の excluded_candidates と同じ扱いで残す。
+        "excluded_held_candidates": {
+            "reason": (
+                "既に保有している銘柄です。買い増しを提案させると、SBIに"
+                "置いてある逆指値（この値段まで下がったら売る、という"
+                "予約注文）が古い値のままになり、実際の損切り価格とずれる"
+                "ため、候補から外した"
+            ),
+            "count": len(held_dropped or []),
+            "symbols": [d["symbol"] for d in (held_dropped or [])],
+        },
     }
 
 
@@ -259,6 +303,23 @@ def main() -> int:
     # 1. データベースから読む
     with connect() as conn:
         candidates, positions, cash, capital = read_inputs(conn, SCREEN, limit=50)
+
+        # 総資金が0円（以下）のときは、ここで止めて記録する。cash に JPY の
+        # 行が無い・消えた場合、select_capital は黙って0.0を返す。それに
+        # 気づかず進むと、1銘柄の上限が0円になって候補が全部除外されるが、
+        # 見た目は「今日は買える銘柄が無かった」正常終了と区別できない。
+        if capital <= 0:
+            detail = (
+                "総資金が0円です。現金の記録が入っていない可能性があります"
+                "（investment.jobs.init_portfolio がまだ実行されていない、"
+                "または cash の記録が消えたなど）"
+            )
+            record_gap(conn, scope="capital:zero", detail=detail)
+            print(detail)
+            return 1
+
+    # 1b. 既に保有している銘柄を候補から外す（AIに買い増しを提案させない）
+    candidates, held_dropped = drop_already_held(candidates, positions)
 
     # 2. 株価を取る（この間、データベースには接続しない）
     priced_candidates, gaps = attach_last_price(candidates)
@@ -279,12 +340,21 @@ def main() -> int:
             ),
         )
         for d in dropped
+    ] + [
+        (
+            f"candidate_already_held:{d['symbol']}",
+            f"{d['symbol']} は既に保有しているため、買い増しの提案を防ぐために候補から外しました",
+        )
+        for d in held_dropped
     ]
     if gaps:
         with connect() as conn:
             record_gaps(conn, gaps)
 
-    ctx = assemble(priced_candidates, positions, cash, SETTINGS, SCREEN, dropped, capital)
+    ctx = assemble(
+        priced_candidates, positions, cash, SETTINGS, SCREEN, dropped, capital,
+        held_dropped=held_dropped,
+    )
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
     OUTPUT.write_text(json.dumps(ctx, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
     print(

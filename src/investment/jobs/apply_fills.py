@@ -45,13 +45,14 @@ def _position_of(conn, symbol: str) -> tuple[Position | None, date | None]:
     return None, None
 
 
-def _bucket_of_proposal(conn, proposal_id) -> str | None:
-    if proposal_id is None:
-        return None
+def _proposal_for(conn, proposal_id) -> dict | None:
+    """申告に紐づく提案の内容（銘柄・枠・実行済みかどうか）を返す。"""
     with conn.cursor() as cur:
-        cur.execute("SELECT bucket FROM proposals WHERE id = %s", (proposal_id,))
+        cur.execute(
+            "SELECT symbol, bucket, outcome FROM proposals WHERE id = %s", (proposal_id,)
+        )
         row = cur.fetchone()
-    return row["bucket"] if row else None
+    return dict(row) if row else None
 
 
 def run(conn, today: date) -> tuple[int, int]:
@@ -72,9 +73,37 @@ def run(conn, today: date) -> tuple[int, int]:
         existing, opened_at = _position_of(conn, fill["symbol"])
 
         try:
+            # 申告が提案に紐づいている場合、その提案がこの申告と本当に
+            # 対応しているかをここで確かめる。確かめないと2つの事故が
+            # 起きる。
+            #
+            # 1. 画面で違うカードを押した場合。A社の買いをB社の提案に
+            #    紐づけて記録すると、そのまま反映してしまえばB社の提案が
+            #    「実行した」ことになり、A社の提案は pending のまま残って
+            #    もう一度買う提案として出てしまう。
+            # 2. 同じ提案に対する申告が2件ある場合（二重に記録した、
+            #    画面を2回タップした等）。1件目で提案は「実行した」に
+            #    なっているので、2件目をそのまま反映すると同じ売買が
+            #    二重に保有・現金へ反映されてしまう。
+            proposal = None
+            if row["proposal_id"] is not None:
+                proposal = _proposal_for(conn, row["proposal_id"])
+                if proposal is None:
+                    raise FillError(f"紐づいている提案(#{row['proposal_id']})が見つかりません")
+                if proposal["symbol"] != fill["symbol"]:
+                    raise FillError(
+                        f"申告した銘柄（{fill['symbol']}）と、紐づいている提案の銘柄"
+                        f"（{proposal['symbol']}）が一致しません。"
+                        "画面で違う銘柄のカードを押した可能性があります"
+                    )
+                if proposal["outcome"] == "taken":
+                    raise FillError(
+                        f"紐づいている提案(#{row['proposal_id']})は既に実行済みとして"
+                        "記録されています。同じ売買を二重に申告した可能性があります"
+                    )
+
             if fill["side"] == "buy":
-                bucket_name = _bucket_of_proposal(conn, row["proposal_id"])
-                rule = bucket_by_name(bucket_name or "")
+                rule = bucket_by_name(proposal["bucket"]) if proposal else None
                 if rule is None:
                     raise FillError(
                         "この買いがどの枠のものか分かりません"
@@ -99,6 +128,7 @@ def run(conn, today: date) -> tuple[int, int]:
                 result.cash_delta,
                 result.trade,
                 fill["currency"],
+                row["recorded_at"],
                 proposal_id=row["proposal_id"],
             )
         except FillError as exc:

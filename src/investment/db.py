@@ -237,6 +237,7 @@ def save_fill_result(
     cash_delta: float,
     trade: dict,
     currency: str,
+    recorded_at,
     proposal_id: int | None = None,
 ) -> None:
     """1件の申告の反映を、まとめて1つのトランザクションで書き込む。
@@ -247,12 +248,18 @@ def save_fill_result(
 
     position が None なら、その銘柄の保有を削除する（全部売った場合）。
 
+    recorded_at は利用者が申告した時刻（fills.recorded_at）。取引の
+    executed_at と保有の opened_at にはこれを使い、ジョブが実行された時刻
+    （NOW()）は使わない。月曜の場中に買ってもジョブは翌朝に実行されるため、
+    NOW() を使うと opened_at が翌朝になり、保有日数（回転枠の期限判定や
+    枠ごとの成績の計算に使う）が実際よりずれてしまう。
+
     proposal_id を渡すと、その提案も同じトランザクションで「実行した」
     （outcome = 'taken'）にする。反映と別のトランザクションにすると、
     反映は終わったのに提案だけ pending のまま残る隙間ができ、
     スマホの画面に「まだ買っていない提案」として同じ銘柄が
-    再び出て、二重に買う事故につながる。売り（proposal_id が None）は
-    提案を経由しないので、その場合は何もしない。
+    再び出て、二重に買う事故につながる。proposal_id が None（提案に
+    紐づかない申告）の場合は、実行済みにする提案が無いので何もしない。
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -260,11 +267,11 @@ def save_fill_result(
             INSERT INTO trades
                 (executed_at, symbol, side, quantity, price, currency, fee,
                  bucket, realized_pnl, holding_days)
-            VALUES (NOW(), %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
-                trade["symbol"], trade["side"], trade["quantity"], trade["price"],
-                trade["currency"], trade["fee"], trade["bucket"],
+                recorded_at, trade["symbol"], trade["side"], trade["quantity"],
+                trade["price"], trade["currency"], trade["fee"], trade["bucket"],
                 trade["realized_pnl"], trade["holding_days"],
             ),
         )
@@ -280,7 +287,7 @@ def save_fill_result(
                 INSERT INTO positions
                     (symbol, quantity, avg_price, currency, take_profit, stop_loss,
                      opened_at, bucket)
-                VALUES (%s, %s, %s, %s, %s, %s, NOW(), %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (symbol) DO UPDATE SET
                     quantity    = EXCLUDED.quantity,
                     avg_price   = EXCLUDED.avg_price,
@@ -290,7 +297,8 @@ def save_fill_result(
                 """,
                 (
                     position.symbol, position.quantity, position.avg_price, currency,
-                    position.take_profit, position.stop_loss, position.bucket,
+                    position.take_profit, position.stop_loss, recorded_at,
+                    position.bucket,
                 ),
             )
 

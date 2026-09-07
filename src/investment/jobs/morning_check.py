@@ -225,9 +225,15 @@ def main() -> int:
     for line in lines:
         print(line)
 
-    # 到達の可能性か期限切れがあるときだけ通知する。
-    # 何も起きていない朝に通知すると、通知そのものが意味を失う。
-    if hits or expired:
+    # 到達の可能性・期限切れ・「1件も確認できなかった」のいずれかがあるときだけ
+    # 通知する。何も起きていない朝に通知すると、通知そのものが意味を失う。
+    #
+    # 「1件も確認できなかった」も通知が要る。値動きが1件も取れなかった朝は
+    # hits も expired も両方空になり、以前はここで通知しないまま終わっていた。
+    # しかし「確認できていない」朝こそ、利用者が自分でSBI（証券会社）を
+    # 見にいく必要がある朝であり、通知が届かないと本人はそれに気づけない。
+    all_failed = attempted > 0 and failed == attempted
+    if hits or expired or all_failed:
         # ロック画面ではこの文面が全文になる。「約定」は初心者には分からない
         # 言葉（注文が成立すること）なので使わない。タイトルだけでも
         # 「何を確認すればいいか」が伝わるようにする。
@@ -236,6 +242,8 @@ def main() -> int:
             parts.append(f"{len(hits)} 件が売れた可能性")
         if expired:
             parts.append(f"{len(expired)} 件が期限切れ")
+        if all_failed:
+            parts.append("株価が確認できませんでした。自分でSBIを見てください")
         with connect() as conn:
             notify_send(
                 conn,

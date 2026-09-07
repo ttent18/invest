@@ -358,6 +358,42 @@ def test_main_does_not_notify_on_a_quiet_morning():
     notify.assert_not_called()
 
 
+def test_main_notifies_when_nothing_could_be_confirmed():
+    """値動きが1件も取れなかった朝も、確認できなかったことを知らせること。
+
+    hits も expired も両方空になるため、以前はここで通知しないまま
+    終わっていた。しかし「確認できていない」朝こそ、利用者が自分で
+    SBI（証券会社）を見にいく必要がある朝である。
+    """
+    with (
+        patch("investment.jobs.morning_check.connect"),
+        patch("investment.jobs.morning_check.select_positions",
+              return_value=[{"symbol": "1111.T", "bucket": "じっくり",
+                             "opened_at": date(2026, 9, 1)}]),
+        patch("investment.jobs.morning_check.run", return_value=([], 1, 1)),
+        patch("investment.jobs.morning_check.notify_send") as notify,
+    ):
+        main()
+
+    notify.assert_called_once()
+    assert "確認できません" in notify.call_args.kwargs["body"]
+
+
+def test_main_does_not_notify_when_no_position_had_a_window_to_check():
+    """まだ確認すべき期間が無い（今日開いたばかり等）は失敗ではないので、通知しない。"""
+    with (
+        patch("investment.jobs.morning_check.connect"),
+        patch("investment.jobs.morning_check.select_positions",
+              return_value=[{"symbol": "1111.T", "bucket": "じっくり",
+                             "opened_at": date(2026, 9, 8)}]),
+        patch("investment.jobs.morning_check.run", return_value=([], 0, 0)),
+        patch("investment.jobs.morning_check.notify_send") as notify,
+    ):
+        main()
+
+    notify.assert_not_called()
+
+
 def test_main_notifies_when_a_position_passed_its_deadline():
     """回転枠の期限切れは、値動きが無くても知らせる。降りる必要があるため。
 
