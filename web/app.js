@@ -147,6 +147,35 @@ export async function postAnalyze() {
   return { ok: true, data: result.data };
 }
 
+// POST /api/subscribe — 通知の宛先を登録する。
+//
+// subscription はブラウザの PushSubscription.toJSON() をそのまま渡す
+// （endpoint / keys.p256dh / keys.auth）。形は
+// functions/_shared/validate.js の validateSubscription が検証する形と
+// 同じにすること（task-9-report.md に対応表がある）。
+export async function postSubscribe(subscription) {
+  const result = await postJson("/api/subscribe", subscription);
+  if (!result.ok) {
+    return { ok: false, kind: result.kind, message: result.message };
+  }
+  return { ok: true };
+}
+
+// /api/state が返す vapid_public_key（base64url の文字列）を、
+// pushManager.subscribe({ applicationServerKey }) が要求する Uint8Array に
+// 変換する。Web Push の決まりごとで、ブラウザの Push API はこの形でしか
+// 鍵を受け取れない。
+export function urlBase64ToUint8Array(base64String) {
+  const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
+  const rawData = atob(base64);
+  const outputArray = new Uint8Array(rawData.length);
+  for (let i = 0; i < rawData.length; i++) {
+    outputArray[i] = rawData.charCodeAt(i);
+  }
+  return outputArray;
+}
+
 // ---------------------------------------------------------------------------
 // 表示の整形
 // ---------------------------------------------------------------------------

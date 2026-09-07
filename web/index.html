@@ -6,6 +6,14 @@
     <meta name="theme-color" content="#0f1115" />
     <title>今日やること</title>
     <link rel="stylesheet" href="/app.css" />
+    <link rel="manifest" href="/manifest.json" />
+    <!-- iOSはアイコンにこれを見る（manifestのicons配列は見ない）。 -->
+    <link rel="apple-touch-icon" href="/icon-180.png" />
+    <!-- これが無いと、ホーム画面に追加してもSafariのタブとして開いてしまい、
+         window.navigator.standalone が常にfalseのままになる（＝下の案内が
+         永久に消えず、通知の許可も一生求められない）。 -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="投資" />
   </head>
   <body>
     <noscript>
@@ -14,6 +22,7 @@
 
     <div class="app-container">
       <div id="nav-root"></div>
+      <div id="install-banner-root"></div>
       <h1>今日やること</h1>
       <div id="banner-root"></div>
       <main id="main-root">
@@ -30,6 +39,8 @@
         postFill,
         postSkip,
         postAnalyze,
+        postSubscribe,
+        urlBase64ToUint8Array,
         yen,
         pct,
         whenText,
@@ -38,6 +49,136 @@
         banner,
         renderNav,
       } from "/app.js";
+
+      // ---------------------------------------------------------------
+      // ホーム画面への追加 / 通知
+      //
+      // iPhoneでは、ホーム画面に追加したアイコンから開いた場合だけ通知が
+      // 届く。Safariのタブとして開いているだけでは、
+      // Notification.requestPermission() すら呼べない（Appleの仕様で、
+      // 回避する方法が無い）。だからまず「ホーム画面に追加されているか」を
+      // 判定し、されていなければ通知の話に進めず、追加の手順だけを見せる。
+      // ---------------------------------------------------------------
+
+      const isStandalone =
+        window.navigator.standalone === true ||
+        window.matchMedia("(display-mode: standalone)").matches;
+
+      // タブで開いている間ずっと見える、常設の案内（refreshで消えない
+      // banner-root とは別のrootに出す）。
+      function renderInstallBanner() {
+        const root = document.getElementById("install-banner-root");
+        root.innerHTML = "";
+        if (isStandalone) return;
+        root.appendChild(
+          banner(
+            "info",
+            "通知を受け取るには、ホーム画面への追加が必要です。\n" +
+              "下の共有ボタン（□に↑）→「ホーム画面に追加」→ そのアイコンから開いてください。"
+          )
+        );
+      }
+
+      // Service Workerの登録（通知を受け取るための下準備）。
+      // 登録に失敗しても、この画面自体（提案の確認・記録）は普通に使える
+      // ままにする。通知は補助であって本体ではないため、ここで投げ直して
+      // 画面の読み込み自体を止めることはしない。
+      function registerServiceWorker() {
+        if (!("serviceWorker" in navigator)) return;
+        navigator.serviceWorker.register("/sw.js").catch((err) => {
+          console.error("通知を受け取る準備に失敗しました", err);
+        });
+      }
+
+      // 「通知を受け取る」の押下。必ずボタンを押されたことをきっかけに
+      // Notification.requestPermission() を呼ぶこと（自動で呼ぶとiPhoneでは
+      // 拒否されて、以後二度と許可を求められなくなる）。
+      async function subscribeToNotifications(button, vapidPublicKey) {
+        const original = button.textContent;
+        button.disabled = true;
+
+        if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
+          showTransientMessage("この端末では通知を使えません", "info");
+          button.disabled = false;
+          return;
+        }
+
+        let permission;
+        try {
+          permission = await Notification.requestPermission();
+        } catch (err) {
+          console.error("通知の許可を確認できませんでした", err);
+          showTransientMessage("通知の許可を確認できませんでした", "info");
+          button.disabled = false;
+          return;
+        }
+
+        if (permission !== "granted") {
+          // 拒否はエラーとして扱わない。通知は補助であって本体ではない。
+          showTransientMessage(
+            "通知は受け取らない設定になっています。iPhoneの設定から変えられます",
+            "info"
+          );
+          button.disabled = false;
+          return;
+        }
+
+        try {
+          const registration = await navigator.serviceWorker.ready;
+          const subscription = await registration.pushManager.subscribe({
+            userVisibleOnly: true,
+            applicationServerKey: urlBase64ToUint8Array(vapidPublicKey),
+          });
+          const result = await postSubscribe(subscription.toJSON());
+          if (!result.ok) {
+            showTransientMessage(result.message, "danger");
+            button.disabled = false;
+            button.textContent = original;
+            return;
+          }
+          button.textContent = "通知を受け取ります";
+          button.disabled = true;
+        } catch (err) {
+          console.error("通知の登録に失敗しました", err);
+          showTransientMessage("通知の登録に失敗しました。もう一度お試しください", "danger");
+          button.disabled = false;
+          button.textContent = original;
+        }
+      }
+
+      // ホーム画面に追加されている（isStandalone）ときだけ出すカード。
+      // vapidPublicKey が無い（/api/stateがnullを返した＝サーバー側の
+      // 設定がまだ済んでいない）ときは、ボタンを押せない状態で理由だけ出す。
+      function renderNotifyCard(root, vapidPublicKey) {
+        if (!isStandalone) return;
+
+        const card = document.createElement("div");
+        card.className = "card";
+        const h = document.createElement("h2");
+        h.textContent = "通知";
+        card.appendChild(h);
+
+        const note = document.createElement("p");
+        note.className = "hint-text";
+        const btn = document.createElement("button");
+        btn.className = "btn btn-block";
+
+        if (!vapidPublicKey) {
+          note.textContent = "通知の設定がまだ済んでいません。";
+          btn.classList.add("btn-secondary");
+          btn.textContent = "通知を受け取る";
+          btn.disabled = true;
+        } else {
+          note.textContent = "損切りが必要なときや、新しい提案ができたときにお知らせします。";
+          btn.classList.add("btn-primary");
+          btn.textContent = "通知を受け取る";
+          btn.addEventListener("click", () => subscribeToNotifications(btn, vapidPublicKey));
+        }
+
+        card.appendChild(note);
+        card.appendChild(btn);
+        root.appendChild(card);
+      }
 
       // ---------------------------------------------------------------
       // 帯（一時的なお知らせ）
@@ -506,6 +647,12 @@
           console.error("現金・総資金の表示に失敗しました", err);
         }
 
+        try {
+          renderNotifyCard(main, state.vapid_public_key);
+        } catch (err) {
+          console.error("通知カードの表示に失敗しました", err);
+        }
+
         const analyzeCard = document.createElement("div");
         analyzeCard.className = "card";
         const analyzeBtn = document.createElement("button");
@@ -538,6 +685,8 @@
       }
 
       document.getElementById("nav-root").appendChild(renderNav("today"));
+      renderInstallBanner();
+      registerServiceWorker();
       loadAndRender();
     </script>
   </body>
