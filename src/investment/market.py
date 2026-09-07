@@ -2,6 +2,8 @@
 
 from dataclasses import dataclass
 
+import yfinance as yf
+
 
 @dataclass(frozen=True)
 class Fundamentals:
@@ -38,3 +40,59 @@ def normalize_symbol(code: str) -> str:
 def is_japanese(symbol: str) -> bool:
     """正規化済みのシンボルが日本株かどうかを返す。"""
     return symbol.endswith(".T")
+
+
+class MarketDataError(RuntimeError):
+    """株価・財務データの取得に失敗した。
+
+    このエラーが出た日は判断を行わない。古い値で代用しない。
+    """
+
+
+def _equity_ratio(balance_sheet) -> float | None:
+    """貸借対照表から自己資本比率を計算する。取れなければ None。"""
+    if balance_sheet is None or getattr(balance_sheet, "empty", True):
+        return None
+    try:
+        equity = float(balance_sheet.loc["Stockholders Equity"].iloc[0])
+        total = float(balance_sheet.loc["Total Assets"].iloc[0])
+    except (KeyError, IndexError, TypeError, ValueError):
+        return None
+    if total == 0:
+        return None
+    return equity / total
+
+
+def _as_float(value) -> float | None:
+    if value is None:
+        return None
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    return None if f != f else f  # NaN を除く
+
+
+def fetch_fundamentals(code: str) -> Fundamentals:
+    """1銘柄の財務指標を取得する。
+
+    個別の項目が取れないことは正常(None を入れる)。
+    通信そのものが失敗した場合は MarketDataError を投げる。
+    """
+    symbol = normalize_symbol(code)
+    try:
+        ticker = yf.Ticker(symbol)
+        info = ticker.info or {}
+        balance = ticker.balance_sheet
+    except Exception as exc:  # yfinance は多様な例外を投げる
+        raise MarketDataError(f"{symbol} の取得に失敗しました") from exc
+
+    return Fundamentals(
+        symbol=symbol,
+        name=str(info.get("shortName") or info.get("longName") or symbol),
+        market_cap=_as_float(info.get("marketCap")),
+        revenue_growth=_as_float(info.get("revenueGrowth")),
+        operating_margin=_as_float(info.get("operatingMargins")),
+        roe=_as_float(info.get("returnOnEquity")),
+        equity_ratio=_equity_ratio(balance),
+    )
