@@ -515,3 +515,44 @@ def test_save_last_prices_updates_only_the_symbols_given(conn):
 
 def test_save_last_prices_with_nothing_to_save_writes_nothing(conn):
     assert save_last_prices(conn, {}) == 0
+
+
+# --- 二重送信よけ（client_key） -------------------------------------------
+# 画面のボタンを2回押すと fills に2行入ってしまう。計画2-A で入れた
+# 「同じ提案に2回申告が来たら弾く」守りは、2行目を別の申告として扱うので
+# すり抜ける。行そのものを作らせない。
+
+
+def test_the_same_client_key_cannot_be_recorded_twice(conn):
+    """画面のボタンを2回押しても、記録が2行にならないこと。
+
+    計画2-A の「同じ提案に2回申告が来たら弾く」守りは、2行目を別の申告として
+    扱うのですり抜ける。行そのものを作らせない。
+    """
+    sql = """
+        INSERT INTO fills (symbol, side, quantity, price, currency, client_key)
+        VALUES ('1111.T', 'buy', 100, 900, 'JPY', 'abc-123')
+    """
+    with conn.cursor() as cur:
+        cur.execute(sql)
+    conn.commit()
+
+    with conn.cursor() as cur, pytest.raises(psycopg.errors.UniqueViolation):
+        cur.execute(sql)
+
+
+def test_client_key_may_be_absent(conn):
+    """鍵の無い記録も入れられること（手作業で入れる場合）。
+
+    UNIQUE 制約は NULL を重複とみなさないので、複数行入る。
+    """
+    sql = """
+        INSERT INTO fills (symbol, side, quantity, price, currency)
+        VALUES ('1111.T', 'buy', 100, 900, 'JPY')
+    """
+    with conn.cursor() as cur:
+        cur.execute(sql)
+        cur.execute(sql)
+        cur.execute("SELECT COUNT(*) AS c FROM fills")
+        assert cur.fetchone()["c"] == 2
+    conn.commit()

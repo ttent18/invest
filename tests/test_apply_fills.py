@@ -2,6 +2,7 @@
 
 import os
 from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -14,6 +15,7 @@ from investment.jobs.apply_fills import main, run
 pytestmark = pytest.mark.integration
 
 TEST_URL = os.environ.get("DATABASE_URL_TEST")
+JST = ZoneInfo("Asia/Tokyo")
 
 
 @pytest.fixture
@@ -561,3 +563,52 @@ def test_main_does_not_notify_when_everything_was_applied(tmp_path):
         assert main() == 0
 
     notify.assert_not_called()
+
+
+# --- 売買日時（traded_at） --------------------------------------------------
+# recorded_at（画面で入力した時刻）を使うと、翌日に入力したときに1日ずれる。
+# 利用者が実際に売買した日時（traded_at）があれば、そちらを使う。
+
+
+def test_the_traded_time_is_used_when_the_user_gave_one(conn):
+    """利用者が入力した売買日時があれば、それを使うこと。
+
+    入力した時刻（recorded_at）ではなく、実際に売買した時刻を使う。
+    翌日に入力すると1日ずれるため。保有日数の正確さは、どちらの枠が
+    向いているかを測るというこの仕組みの目的に直結する。
+    """
+    pid = _proposal(conn, "1111.T", "じっくり")
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO fills (proposal_id, symbol, side, quantity, price, currency,
+                               traded_at)
+            VALUES (%s, '1111.T', 'buy', 100, 900, 'JPY',
+                    TIMESTAMPTZ '2026-09-01 10:30:00+09')
+            """,
+            (pid,),
+        )
+    conn.commit()
+
+    run(conn, today=date(2026, 9, 8))
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT opened_at FROM positions WHERE symbol = '1111.T'")
+        opened = cur.fetchone()["opened_at"]
+        cur.execute("SELECT executed_at FROM trades WHERE symbol = '1111.T'")
+        executed = cur.fetchone()["executed_at"]
+
+    assert opened.astimezone(JST).date() == date(2026, 9, 1)
+    assert executed.astimezone(JST).date() == date(2026, 9, 1)
+
+
+def test_the_recorded_time_is_used_when_no_traded_time_was_given(conn):
+    """売買日時が無ければ、これまでどおり申告した時刻を使うこと。"""
+    pid = _proposal(conn, "1111.T", "じっくり")
+    _fill(conn, proposal_id=pid, symbol="1111.T", side="buy", quantity=100, price=900)
+
+    run(conn, today=date(2026, 9, 8))
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT opened_at FROM positions WHERE symbol = '1111.T'")
+        assert cur.fetchone()["opened_at"] is not None

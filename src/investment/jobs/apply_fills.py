@@ -60,6 +60,13 @@ def run(conn, today: date) -> tuple[int, int]:
     """未反映の申告を古い順に反映する。戻り値は (反映できた件数, できなかった件数)。
 
     1件の失敗で全体を止めない。失敗した申告は消さず、理由を残す。
+
+    today はこの関数の中では使わない。保有日数の終点は、以前はジョブが
+    走った日（today）を使っていたが、それだと売った日が翌朝にずれる
+    （計画2-A の最終レビューで指摘済み）。いまは申告ごとの売買日時
+    （traded_at か recorded_at）から終点を出す。引数として残しているのは、
+    main() と既存テストの呼び出し側をこのタスクの範囲外まで書き換えず、
+    呼び出し方を変えずに済ませるため。
     """
     ok = failed = 0
     for row in select_unapplied_fills(conn):
@@ -74,6 +81,14 @@ def run(conn, today: date) -> tuple[int, int]:
         existing, opened_at = _position_of(conn, fill["symbol"])
 
         try:
+            # 利用者が実際に売買した日時があればそれを、無ければ申告した時刻を
+            # 使う。ジョブが走った時刻を使うと、翌朝に反映されるぶん常にずれる。
+            # この計算も try の中に入れる。ここで例外が起きると、1件の申告の
+            # 失敗のはずが、下の except に届かずに run() 全体を止めてしまい、
+            # まだ処理していない残りの申告まで巻き添えにするため。
+            happened_at = row["traded_at"] or row["recorded_at"]
+            happened_on = happened_at.astimezone(JST).date()
+
             # 申告が提案に紐づいている場合、その提案がこの申告と本当に
             # 対応しているかをここで確かめる。確かめないと2つの事故が
             # 起きる。
@@ -113,7 +128,7 @@ def run(conn, today: date) -> tuple[int, int]:
                 cash = select_cash(conn).get(fill["currency"], 0.0)
                 result = apply_buy(existing, fill, rule, cash)
             else:
-                result = apply_sell(existing, fill, opened_at, today)
+                result = apply_sell(existing, fill, opened_at, happened_on)
 
             # 申告に提案が紐づいていれば、同じトランザクションの中で
             # その提案も「実行した」（outcome = 'taken'）にする。買い・
@@ -129,7 +144,7 @@ def run(conn, today: date) -> tuple[int, int]:
                 result.cash_delta,
                 result.trade,
                 fill["currency"],
-                row["recorded_at"],
+                happened_at,
                 proposal_id=row["proposal_id"],
             )
         except Exception as exc:  # noqa: BLE001 - 理由は下のコメントを参照

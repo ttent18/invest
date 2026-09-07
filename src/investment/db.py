@@ -248,9 +248,10 @@ def save_fill_result(
 
     position が None なら、その銘柄の保有を削除する（全部売った場合）。
 
-    recorded_at は利用者が申告した時刻（fills.recorded_at）。取引の
-    executed_at と保有の opened_at にはこれを使い、ジョブが実行された時刻
-    （NOW()）は使わない。月曜の場中に買ってもジョブは翌朝に実行されるため、
+    recorded_at には、実際に売買した日時（fills.traded_at）が分かっていれば
+    それを、無ければ申告した時刻（fills.recorded_at）を呼び出し側が選んで渡す。
+    取引の executed_at と保有の opened_at にはこれを使い、ジョブが実行された
+    時刻（NOW()）は使わない。月曜の場中に買ってもジョブは翌朝に実行されるため、
     NOW() を使うと opened_at が翌朝になり、保有日数（回転枠の期限判定や
     枠ごとの成績の計算に使う）が実際よりずれてしまう。
 
