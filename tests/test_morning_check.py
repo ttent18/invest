@@ -500,3 +500,69 @@ def test_run_returns_hits_even_when_save_last_prices_fails():
     call_kwargs = gap.call_args.kwargs
     assert call_kwargs["scope"] == "price:save_failed"
     assert "保存できませんでした" in call_kwargs["detail"]
+
+
+# ---------------------------------------------------------------------------
+# 指摘: record_gap（「取れなかった事実を残す」だけの補助）自体が失敗しても、
+# 本体（損切り・利確への到達の確認と通知）を巻き添えにしないこと。
+#
+# これまでは record_gap の呼び出しが素のままで、record_gap 自体が例外を
+# 投げると run() がそのまま落ち、まだ確認していない残りの保有の判定や、
+# 既に見つかっている損切り到達の通知まで丸ごと飛ばなくなっていた。
+# ---------------------------------------------------------------------------
+
+
+def test_run_returns_hits_even_when_record_gap_fails_on_a_fetch_error():
+    """値動きが取得できなかった1件を record_gap に残そうとして、それ自体が
+    失敗しても、他の銘柄の損切り到達の判定は続くこと。
+    """
+    def fake_range(symbol, start, end):
+        if symbol == "3993.T":
+            raise MarketDataError("取れません")
+        return (200.0, 168.0)  # AAPL が損切り(168)に到達
+
+    with (
+        patch("investment.jobs.morning_check.fetch_range", side_effect=fake_range),
+        patch("investment.jobs.morning_check.fetch_last_price", return_value=200.0),
+        patch("investment.jobs.morning_check.save_last_prices"),
+        patch(
+            "investment.jobs.morning_check.record_gap",
+            side_effect=Exception("データベースに書けません"),
+        ),
+    ):
+        # record_gap が例外を投げても run() 自体は例外を投げない
+        hits, failed, attempted = run(RUN_POSITIONS, conn=None, today=TODAY)
+
+    assert [h["symbol"] for h in hits] == ["AAPL"]
+    assert hits[0]["kind"] == "stop_loss"
+    assert failed == 1
+    assert attempted == 2
+
+
+def test_run_returns_hits_even_when_record_gap_fails_on_a_save_error():
+    """株価の保存の失敗を record_gap に残そうとして、それ自体が失敗しても、
+    損切り到達の判定結果は返ること。
+    """
+    def fake_range(symbol, start, end):
+        if symbol == "3993.T":
+            return (2500.0, 2200.0)  # 安値が損切り(2254)を下回った
+        return (200.0, 190.0)
+
+    with (
+        patch("investment.jobs.morning_check.fetch_range", side_effect=fake_range),
+        patch("investment.jobs.morning_check.fetch_last_price", return_value=200.0),
+        patch(
+            "investment.jobs.morning_check.save_last_prices",
+            side_effect=ValueError("保存に失敗しました"),
+        ),
+        patch(
+            "investment.jobs.morning_check.record_gap",
+            side_effect=Exception("データベースに書けません"),
+        ),
+    ):
+        # save_last_prices も record_gap も失敗するが、run() は例外を投げない
+        hits, failed, attempted = run(RUN_POSITIONS, conn=None, today=TODAY)
+
+    assert [h["symbol"] for h in hits] == ["3993.T"]
+    assert failed == 0
+    assert attempted == 2

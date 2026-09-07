@@ -77,6 +77,13 @@ def test_fills_are_applied_before_anything_reads_the_positions(workflow: str):
     [
         ("analyze.yml", "investment.jobs.apply_decision"),
         ("morning.yml", "investment.jobs.morning_check"),
+        # apply_fills も notify.send を呼びうる（「記録できていない売買が
+        # あります」の通知）。2026-09-08 の最終レビューで、morning.yml /
+        # analyze.yml の apply_fills の段にだけ鍵が渡っておらず、この通知が
+        # 一度も届かない欠陥が見つかった。以後この欠陥を検知するため、
+        # apply_decision / morning_check と同じ形でここにも入れておく。
+        ("analyze.yml", "investment.jobs.apply_fills"),
+        ("morning.yml", "investment.jobs.apply_fills"),
     ],
 )
 def test_the_notification_keys_reach_the_step_that_sends_them(
@@ -87,8 +94,8 @@ def test_the_notification_keys_reach_the_step_that_sends_them(
     ファイルのどこかに鍵の名前があるだけでは足りない。別のステップ
     （例えばマイグレーション）の env に付いていても、それだけで
     このテストが通ってしまっては、渡し忘れを検出できない。
-    YAML として読み、通知を実際に送る処理（apply_decision / morning_check）
-    を実行するステップの env に、両方の鍵があることまで見る。
+    YAML として読み、通知を実際に送る処理（apply_decision / morning_check /
+    apply_fills）を実行するステップの env に、両方の鍵があることまで見る。
     """
     doc = yaml.safe_load((WORKFLOWS / workflow).read_text(encoding="utf-8"))
     job = next(iter(doc["jobs"].values()))
