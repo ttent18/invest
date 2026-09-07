@@ -17,6 +17,12 @@ CTX = {
     "rule_version": "v2",
     # 保有無し。売りの検証テストは各テストの中で positions を差し替えて行う。
     "positions": [],
+    "buckets": [
+        {"name": "じっくり", "take_profit_pct": 0.22, "stop_loss_pct": 0.08,
+         "max_holding_days": None, "slots": 2, "used": 0, "free": 2},
+        {"name": "回転", "take_profit_pct": 0.10, "stop_loss_pct": 0.05,
+         "max_holding_days": 10, "slots": 2, "used": 0, "free": 2},
+    ],
 }
 
 
@@ -32,6 +38,7 @@ def good(**overrides) -> dict:
         "scenario": "2〜3週間で調整前の水準に戻る想定",
         "confidence": "mid",
         "strategy_tag": "短期モメンタム",
+        "bucket": "じっくり",
     }
     d.update(overrides)
     return d
@@ -437,11 +444,13 @@ def test_insert_proposals_saves_validated_decision(conn):
     row = rows[0]
     assert row["symbol"] == "3993.T"
     assert row["action"] == "buy"
-    assert row["quantity"] == 33
+    assert row["quantity"] == 100
     assert row["confidence"] == "mid"
     assert row["outcome"] == "pending"
     assert row["journal_path"] == "journal/2026-09-07.md"
     assert row["rule_version"] == "v1"
+    # どちらの枠で買ったかを記録する。これが無いと枠ごとの成績を比べられない
+    assert row["bucket"] == "じっくり"
 
 
 @pytest.mark.integration
@@ -634,3 +643,96 @@ def test_load_decision_reads_a_valid_file(tmp_path):
     assert missing is None
     assert decisions == [{"symbol": "3993.T"}]
     assert journal_path == "journal/2026-09-07.md"
+
+
+# --- 枠（じっくり / 回転）の検証 --------------------------------------------
+# v3 から、どちらの枠で買うかによって利確・損切りの幅が変わる。
+# これまで validate は利確・損切りの幅を一切見ていなかったため、
+# AIがルールと違う幅を書いてもそのまま通っていた。
+
+
+def _ctx_with_buckets(**overrides) -> dict:
+    ctx = dict(CTX)
+    ctx["buckets"] = [
+        {"name": "じっくり", "take_profit_pct": 0.22, "stop_loss_pct": 0.08,
+         "max_holding_days": None, "slots": 2, "used": 0, "free": 2},
+        {"name": "回転", "take_profit_pct": 0.10, "stop_loss_pct": 0.05,
+         "max_holding_days": 10, "slots": 2, "used": 0, "free": 2},
+    ]
+    ctx.update(overrides)
+    return ctx
+
+
+def _patient(**overrides) -> dict:
+    """じっくり枠の正しい提案。1,200円 × 100株。"""
+    d = good(bucket="じっくり", entry_price=1200.0, take_profit=1464.0,
+             stop_loss=1104.0, quantity=100)
+    d.update(overrides)
+    return d
+
+
+def _fast(**overrides) -> dict:
+    """回転枠の正しい提案。1,200円 × 100株、+10%/-5%。"""
+    d = good(bucket="回転", entry_price=1200.0, take_profit=1320.0,
+             stop_loss=1140.0, quantity=100)
+    d.update(overrides)
+    return d
+
+
+def test_accepts_a_correct_patient_proposal():
+    assert validate(_patient(), _ctx_with_buckets(), SETTINGS) == []
+
+
+def test_accepts_a_correct_fast_proposal():
+    assert validate(_fast(), _ctx_with_buckets(), SETTINGS) == []
+
+
+def test_rejects_a_missing_bucket():
+    d = _patient()
+    del d["bucket"]
+    assert any("bucket" in e for e in validate(d, _ctx_with_buckets(), SETTINGS))
+
+
+def test_rejects_an_unknown_bucket():
+    errors = validate(_patient(bucket="なんとなく"), _ctx_with_buckets(), SETTINGS)
+    assert any("なんとなく" in e for e in errors)
+
+
+def test_rejects_a_take_profit_that_does_not_match_the_bucket():
+    """回転枠(+10%)なのに +22% の利確を書いたら却下する。
+
+    これを通すと「枠」が名前だけになり、どちらが効いているかを
+    比較できなくなる。
+    """
+    errors = validate(_fast(take_profit=1464.0), _ctx_with_buckets(), SETTINGS)
+    assert any("take_profit" in e and "回転" in e for e in errors), errors
+
+
+def test_rejects_a_stop_loss_that_does_not_match_the_bucket():
+    errors = validate(_fast(stop_loss=1104.0), _ctx_with_buckets(), SETTINGS)
+    assert any("stop_loss" in e and "回転" in e for e in errors), errors
+
+
+def test_allows_rounding_to_the_nearest_yen():
+    """1円単位に丸めた値は許容する。899 × 1.22 = 1096.78 のような端数が出るため。"""
+    e = 899.0
+    d = _patient(entry_price=e, take_profit=round(e * 1.22, 2),
+                 stop_loss=round(e * 0.92, 2), quantity=100)
+    ctx = _ctx_with_buckets(candidates=[{"symbol": "3993.T", "last_price": 899.0}])
+    assert validate(d, ctx, SETTINGS) == []
+
+
+def test_rejects_a_buy_when_the_bucket_has_no_free_slot():
+    """枠が埋まっている側には提案できない。
+
+    全体では空きがあっても、その枠が埋まっていれば買えない。
+    """
+    ctx = _ctx_with_buckets()
+    ctx["buckets"] = [
+        {**ctx["buckets"][0], "used": 2, "free": 0},   # じっくり枠は満杯
+        ctx["buckets"][1],                              # 回転枠は空いている
+    ]
+    errors = validate(_patient(), ctx, SETTINGS)
+    assert any("じっくり" in e and "空き" in e for e in errors), errors
+    # 回転枠なら通る
+    assert validate(_fast(), ctx, SETTINGS) == []

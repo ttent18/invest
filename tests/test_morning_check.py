@@ -5,6 +5,7 @@ from investment.jobs.morning_check import (
     LOOKBACK_DAYS,
     _lookback_window,
     detect_hits,
+    find_expired,
     run,
     summarize_result,
 )
@@ -231,3 +232,82 @@ def test_summarize_hits_present_returns_zero_even_with_partial_failures():
     assert code == 0
     joined = "\n".join(lines)
     assert "2" in joined  # 取得できなかった件数も明示する
+
+
+# --- 回転枠の期限切れ -------------------------------------------------------
+# 回転枠は「10営業日で結論が出る」前提で入る。出なければ前提そのものが
+# 外れているので、勝ち負けに関係なく降りて枠を空ける（rules/v3.md）。
+
+
+def test_expired_lists_a_fast_bucket_position_past_its_deadline():
+    """回転枠の銘柄が期限を過ぎていたら知らせること。"""
+    positions = [
+        # 8/24(月)に買って、今日は9/8(月)。営業日で11日経過（期限10営業日）
+        {"symbol": "1111.T", "bucket": "回転", "opened_at": date(2026, 8, 24)},
+    ]
+    expired = find_expired(positions, today=date(2026, 9, 8))
+
+    assert len(expired) == 1
+    assert expired[0]["symbol"] == "1111.T"
+    assert expired[0]["business_days"] == 11
+    assert expired[0]["limit"] == 10
+
+
+def test_expired_ignores_a_fast_bucket_position_still_within_the_deadline():
+    positions = [
+        # 9/1(火)に買って、今日は9/8(月)。営業日で5日経過
+        {"symbol": "1111.T", "bucket": "回転", "opened_at": date(2026, 9, 1)},
+    ]
+    assert find_expired(positions, today=date(2026, 9, 8)) == []
+
+
+def test_expired_ignores_the_patient_bucket_which_has_no_deadline():
+    """じっくり枠には期限が無いので、どれだけ経っても対象外。"""
+    positions = [
+        {"symbol": "1111.T", "bucket": "じっくり", "opened_at": date(2026, 1, 1)},
+    ]
+    assert find_expired(positions, today=date(2026, 9, 8)) == []
+
+
+def test_expired_counts_business_days_not_calendar_days():
+    """土日を数えないこと。暦日で数えると、実際より早く期限切れになる。
+
+    8/24(月)から9/4(金)は暦日で11日だが、営業日では10日（＝期限ちょうど）。
+    ここを暦日で数えると、まだ期限内の銘柄を売れと言ってしまう。
+    """
+    positions = [
+        {"symbol": "1111.T", "bucket": "回転", "opened_at": date(2026, 8, 24)},
+    ]
+    assert find_expired(positions, today=date(2026, 9, 4)) == []
+
+
+def test_summarize_lists_expired_positions_alongside_the_hits():
+    """期限切れは「約定したかも」とは別のこととして、必ず表示すること。
+
+    約定の可能性がある銘柄があってもなくても、期限切れは行動が要る。
+    どちらかに埋もれさせない。
+    """
+    expired = [{"symbol": "1111.T", "bucket": "回転", "business_days": 11, "limit": 10}]
+    lines, code = summarize_result(1, hits=[], failed=0, attempted=1, expired=expired)
+
+    text = "\n".join(lines)
+    assert "1111.T" in text
+    assert "期限" in text
+    assert "11" in text and "10" in text
+    assert code == 0  # 期限切れ自体は異常ではない（行動を促す正常な状態）
+
+
+def test_summarize_shows_expired_even_when_something_was_hit():
+    expired = [{"symbol": "1111.T", "bucket": "回転", "business_days": 12, "limit": 10}]
+    hits = [{"symbol": "2222.T", "kind": "take_profit", "estimated_price": 1464,
+             "day_high": 1470, "day_low": 1400}]
+    lines, _ = summarize_result(2, hits=hits, failed=0, attempted=2, expired=expired)
+
+    text = "\n".join(lines)
+    assert "2222.T" in text      # 約定の可能性
+    assert "1111.T" in text      # 期限切れ
+
+
+def test_summarize_says_nothing_about_deadlines_when_none_expired():
+    lines, _ = summarize_result(1, hits=[], failed=0, attempted=1, expired=[])
+    assert "期限" not in "\n".join(lines)

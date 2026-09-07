@@ -14,7 +14,7 @@ from investment.sizing import position_size, required_win_rate
 
 REQUIRED_FIELDS = (
     "symbol", "action", "entry_price", "take_profit", "stop_loss",
-    "quantity", "rationale", "scenario", "confidence", "strategy_tag",
+    "quantity", "rationale", "scenario", "confidence", "strategy_tag", "bucket",
 )
 VALID_CONFIDENCE = {"low", "mid", "high"}
 VALID_ACTION = {"buy", "sell"}
@@ -27,6 +27,12 @@ VALID_ACTION = {"buy", "sell"}
 # 10%は「通常の値動きは許容しつつ、明らかな間違い(例: 桁違い)は弾く」ための
 # 目安として選んだ値。
 ENTRY_PRICE_TOLERANCE = 0.10
+
+# 利確・損切りの値が、枠の決めた幅と一致しているとみなす許容誤差（円）。
+# 例: 899円 × 1.22 = 1096.78円 のように端数が出るため、1円単位に丸めた値も
+# 通す必要がある。1円あれば丸めは吸収でき、ルール違反（+22%のところを+15%に
+# するなど）は必ず外れる。
+PRICE_MATCH_TOLERANCE_YEN = 1.0
 
 
 def _to_float(decision: dict, field: str) -> tuple[float | None, str | None]:
@@ -134,6 +140,39 @@ def validate(decision: dict, ctx: dict, settings: Settings) -> list[str]:
 
         if not ctx["can_open_new"]:
             errors.append("同時保有の上限に達しているため新規に買えません")
+
+        # v3 から、どの枠（じっくり / 回転）で買うかによって利確・損切りの幅が
+        # 変わる。枠の指定が無い・知らない名前・幅が枠と違う、のいずれも却下する。
+        # ここを通してしまうと「枠」が名前だけのラベルになり、
+        # どちらの型が効いているのかを比べられなくなる。
+        buckets_by_name = {b["name"]: b for b in ctx.get("buckets", [])}
+        bucket = buckets_by_name.get(decision["bucket"])
+        if bucket is None:
+            errors.append(
+                f"bucket {decision['bucket']!r} は知らない枠です"
+                f"（使えるのは {list(buckets_by_name)} のいずれか）"
+            )
+        else:
+            if bucket["free"] <= 0:
+                errors.append(
+                    f"{bucket['name']}枠に空きがありません"
+                    f"（{bucket['slots']}枠すべて使用中）"
+                )
+            if entry is not None:
+                for field, pct, direction in (
+                    ("take_profit", bucket["take_profit_pct"], 1),
+                    ("stop_loss", bucket["stop_loss_pct"], -1),
+                ):
+                    expected = entry * (1 + direction * pct)
+                    actual = tp if field == "take_profit" else sl
+                    if actual is None:
+                        continue
+                    if abs(actual - expected) > PRICE_MATCH_TOLERANCE_YEN:
+                        errors.append(
+                            f"{field} {actual} が{bucket['name']}枠の決まり"
+                            f"（買値の{direction * pct:+.0%}＝{expected:,.2f}円）"
+                            f"と違います"
+                        )
 
         if entry is not None and sl is not None and quantity is not None and sl < entry:
             # 日本株は100株単位でしか注文できない（単元）。AIは「上限金額÷株価」で
@@ -249,9 +288,9 @@ def insert_proposals(conn, decisions: list[dict], journal_path: str) -> int:
     sql = """
         INSERT INTO proposals
             (created_at, symbol, action, quantity, entry_price, take_profit, stop_loss,
-             required_win_rate, rationale, scenario, confidence, strategy_tag,
+             required_win_rate, rationale, scenario, confidence, strategy_tag, bucket,
              rule_version, journal_path)
-        VALUES (NOW(), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        VALUES (NOW(), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """
     with conn.cursor() as cur:
         cur.executemany(
@@ -261,7 +300,7 @@ def insert_proposals(conn, decisions: list[dict], journal_path: str) -> int:
                     d["symbol"], d["action"], d["quantity"], d["entry_price"],
                     d["take_profit"], d["stop_loss"], d["required_win_rate"],
                     d["rationale"], d["scenario"], d["confidence"], d["strategy_tag"],
-                    d["rule_version"], journal_path,
+                    d["bucket"], d["rule_version"], journal_path,
                 )
                 for d in decisions
             ],

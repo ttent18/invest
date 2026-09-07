@@ -15,6 +15,7 @@ import sys
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
+from investment.config import bucket_by_name
 from investment.db import connect, record_gap, select_positions
 from investment.market import MarketDataError, fetch_range
 
@@ -52,6 +53,46 @@ def _opened_date(opened_at, today: date) -> date:
     if isinstance(opened_at, date):
         return opened_at
     return today  # 想定外の型は「今日開いた」扱いにして安全側に倒す
+
+
+def _business_days_between(start: date, end: date) -> int:
+    """start から end までの営業日数を数える（土日を除く。祝日は考慮しない）。
+
+    祝日カレンダーを持ち込まないのは、外部データへの依存を増やしたくないため。
+    祝日を数えてしまうぶん実際よりわずかに長く数えるが、期限の判定が
+    「少し長めに待つ」側にずれるだけなので、早すぎる期限切れは起きない。
+    """
+    days = 0
+    d = start
+    while d < end:
+        d += timedelta(days=1)
+        if d.weekday() < 5:  # 月〜金
+            days += 1
+    return days
+
+
+def find_expired(positions: list[dict], today: date) -> list[dict]:
+    """期限を過ぎた保有を返す（回転枠のみ。じっくり枠には期限が無い）。
+
+    回転枠は「10営業日で結論が出る」前提で入る。出なければ前提そのものが
+    外れているので、勝ち負けに関係なく降りて枠を空ける（rules/v3.md）。
+    値動きしない銘柄が枠に居座ると、4枠しかない戦力が25%減ったまま戻らない。
+    """
+    expired = []
+    for p in positions:
+        bucket = bucket_by_name(p.get("bucket") or "")
+        if bucket is None or bucket.max_holding_days is None:
+            continue
+        opened = _opened_date(p["opened_at"], today)
+        elapsed = _business_days_between(opened, today)
+        if elapsed > bucket.max_holding_days:
+            expired.append({
+                "symbol": p["symbol"],
+                "bucket": bucket.name,
+                "business_days": elapsed,
+                "limit": bucket.max_holding_days,
+            })
+    return expired
 
 
 def detect_hits(
@@ -110,7 +151,8 @@ def run(positions: list[dict], conn, today: date) -> tuple[list[dict], int, int]
 
 
 def summarize_result(
-    positions_count: int, hits: list[dict], failed: int, attempted: int
+    positions_count: int, hits: list[dict], failed: int, attempted: int,
+    expired: list[dict] | None = None,
 ) -> tuple[list[str], int]:
     """判定結果を、表示する行と終了コードに変換する。
 
@@ -124,6 +166,18 @@ def summarize_result(
     人間に確認を促す正常な状態なので、終了コードは0のままでよい。
     """
     lines: list[str] = []
+
+    # 期限切れは「約定したかも」とは別の話で、どちらであっても行動が要る。
+    # 片方に埋もれないよう、先に独立した固まりとして出す。
+    for e in expired or []:
+        lines.append(
+            f"  {e['symbol']}  {e['bucket']}枠の期限切れ"
+            f"（{e['business_days']}営業日経過 / 期限{e['limit']}営業日）。"
+            f"値動きに関係なく、降りて枠を空けてください"
+        )
+    if lines:
+        lines.insert(0, f"次の {len(lines)} 件は保有の期限を過ぎています:")
+        lines.append("")
 
     if hits:
         lines.append(f"次の {len(hits)} 件は約定した可能性があります。SBIで確認してください:")
@@ -163,7 +217,8 @@ def main() -> int:
 
         hits, failed, attempted = run(positions, conn, today)
 
-    lines, code = summarize_result(len(positions), hits, failed, attempted)
+    expired = find_expired([dict(p) for p in positions], today)
+    lines, code = summarize_result(len(positions), hits, failed, attempted, expired)
     for line in lines:
         print(line)
     return code

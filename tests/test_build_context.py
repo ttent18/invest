@@ -29,17 +29,17 @@ def test_assemble_includes_candidates_and_constraints():
     ctx = assemble(candidates, [], {"JPY": 550_000}, SETTINGS, SCREEN, dropped=[])
 
     assert ctx["is_virtual"] is True
-    assert ctx["rule_version"] == "v2"
-    assert ctx["constraints"]["stop_loss_pct"] == 0.08
-    assert ctx["constraints"]["take_profit_pct"] == 0.22
+    assert ctx["rule_version"] == "v3"
     assert ctx["constraints"]["max_positions"] == 4
+    # 利確・損切りの幅は枠ごとに違うので、constraints ではなく buckets にある
+    assert [b["name"] for b in ctx["buckets"]] == ["じっくり", "回転"]
     assert len(ctx["candidates"]) == 1
     assert ctx["candidates"][0]["symbol"] == "3993.T"
     assert ctx["candidates"][0]["last_price"] == 3120.0
 
 
 def test_assemble_reports_no_room_when_positions_are_full():
-    full = [{"symbol": f"{i}.T"} for i in range(4)]  # max_positions=4 が境界
+    full = [{"symbol": f"{i}.T"} for i in range(4)]  # 合計4枠が境界
     ctx = assemble([], full, {"JPY": 0}, SETTINGS, SCREEN, dropped=[])
     assert ctx["can_open_new"] is False
 
@@ -302,3 +302,50 @@ def test_main_records_the_excluded_candidates_in_the_database(tmp_path):
     scope, detail = recorded[0]
     assert scope == "candidate_unaffordable:2222.T"
     assert "270,400" in detail  # 100株の金額
+
+
+# --- 枠（じっくり / 回転）をAIに伝える --------------------------------------
+
+
+def test_assemble_tells_the_ai_each_bucket_and_how_many_slots_are_free():
+    """枠ごとの利確・損切り・期限・空き枠数をAIに渡すこと。
+
+    AIはどちらの枠で買うかを選ぶ必要があり、選んだ枠によって
+    利確幅・損切り幅が変わる。空き枠が無い枠には提案できない。
+    """
+    ctx = assemble([], [], {"JPY": 550_000}, SETTINGS, SCREEN, dropped=[])
+    by_name = {b["name"]: b for b in ctx["buckets"]}
+
+    assert by_name["じっくり"] == {
+        "name": "じっくり", "take_profit_pct": 0.22, "stop_loss_pct": 0.08,
+        "max_holding_days": None, "slots": 2, "used": 0, "free": 2,
+    }
+    assert by_name["回転"] == {
+        "name": "回転", "take_profit_pct": 0.10, "stop_loss_pct": 0.05,
+        "max_holding_days": 10, "slots": 2, "used": 0, "free": 2,
+    }
+
+
+def test_assemble_counts_used_slots_per_bucket():
+    """保有している銘柄を、その銘柄の枠に数えること。"""
+    positions = [
+        {"symbol": "1111.T", "bucket": "回転"},
+        {"symbol": "2222.T", "bucket": "回転"},
+        {"symbol": "3333.T", "bucket": "じっくり"},
+    ]
+    ctx = assemble([], positions, {}, SETTINGS, SCREEN, dropped=[])
+    by_name = {b["name"]: b for b in ctx["buckets"]}
+
+    assert (by_name["回転"]["used"], by_name["回転"]["free"]) == (2, 0)
+    assert (by_name["じっくり"]["used"], by_name["じっくり"]["free"]) == (1, 1)
+
+
+def test_positions_without_a_bucket_are_counted_as_patient_not_ignored():
+    """枠の記録が無い保有を、黙って0扱いにしないこと。
+
+    数え落とすと「枠が空いている」と誤って伝えることになり、
+    上限を超えて買う提案が出てしまう。
+    """
+    ctx = assemble([], [{"symbol": "1111.T"}], {}, SETTINGS, SCREEN, dropped=[])
+    by_name = {b["name"]: b for b in ctx["buckets"]}
+    assert by_name["じっくり"]["used"] == 1

@@ -23,7 +23,7 @@ import math
 import sys
 from pathlib import Path
 
-from investment.config import SCREEN, SETTINGS, ScreenCriteria, Settings
+from investment.config import BUCKETS, MAX_POSITIONS, SCREEN, SETTINGS, ScreenCriteria, Settings
 from investment.db import connect, record_gaps, select_cash, select_positions, select_screened
 from investment.market import MarketDataError, fetch_last_price, lot_size
 from investment.sizing import position_size
@@ -31,7 +31,7 @@ from investment.sizing import position_size
 # 適用しているルールの版。rules/<この値>.md が中身。
 # 提案・取引にこの値を記録することで、あとから版ごとの成績を比べられる。
 # ルールを変えたら rules/vN.md を書いてから、ここを上げること。
-RULE_VERSION = "v2"
+RULE_VERSION = "v3"
 OUTPUT = Path("build/context.json")
 
 
@@ -120,14 +120,21 @@ def _max_quantity(candidate: dict, settings: Settings, unit: int) -> int:
 
     AIが「上限金額 ÷ 株価」を自分で計算すると単元未満の株数を出してしまうため、
     正しい答えをこちらで計算して渡す。
+
+    枠ごとに損切り幅が違うので、いちばん広い損切り幅で計算する。損切りが広い
+    ほど1株あたりの想定損失が大きくなり、買える株数は少なくなるため、
+    これがどの枠でも通る安全側の値になる。
+    （実際には損切り8%以内なら金額の上限のほうが先に効くので、
+    今の2つの枠では同じ値になる。config の test がこの前提を見張っている。）
     """
     price = float(candidate["last_price"])
+    widest_stop = max(b.stop_loss_pct for b in BUCKETS)
     return position_size(
         settings.total_capital,
         settings.risk_per_trade_pct,
         settings.max_position_pct,
         price,
-        price * (1 - settings.stop_loss_pct),
+        price * (1 - widest_stop),
         lot_size=unit,
     )
 
@@ -150,6 +157,20 @@ def _max_entry_price(max_quantity: int, limit: float) -> float:
     return math.floor(limit / max_quantity)
 
 
+def _slots_used(positions: list[dict]) -> dict[str, int]:
+    """枠ごとに、いま何銘柄を持っているかを数える。
+
+    保有に枠の記録が無い場合（計画1では保有を記録していないため、当面は
+    起こらない）は「じっくり枠」として数える。黙って0にすると、
+    枠が空いていないのに空いていると伝えてしまうため。
+    """
+    used: dict[str, int] = {}
+    for p in positions:
+        name = p.get("bucket") or BUCKETS[0].name
+        used[name] = used.get(name, 0) + 1
+    return used
+
+
 def assemble(
     candidates: list[dict],
     positions: list[dict],
@@ -160,16 +181,15 @@ def assemble(
 ) -> dict:
     """AIに渡す情報をまとめる。ここでは外部アクセスを一切しない。"""
     limit = settings.total_capital * settings.max_position_pct
+    used = _slots_used(positions)
     return {
         "is_virtual": True,
         "rule_version": RULE_VERSION,
         "constraints": {
             "total_capital": settings.total_capital,
             "max_position_pct": settings.max_position_pct,
-            "max_positions": settings.max_positions,
+            "max_positions": MAX_POSITIONS,
             "risk_per_trade_pct": settings.risk_per_trade_pct,
-            "stop_loss_pct": settings.stop_loss_pct,
-            "take_profit_pct": settings.take_profit_pct,
             "jp_fee_rate": settings.jp_fee_rate,
             "us_fee_rate": settings.us_fee_rate,
         },
@@ -182,7 +202,19 @@ def assemble(
         },
         "cash": cash,
         "positions": positions,
-        "can_open_new": len(positions) < settings.max_positions,
+        "can_open_new": len(positions) < MAX_POSITIONS,
+        "buckets": [
+            {
+                "name": b.name,
+                "take_profit_pct": b.take_profit_pct,
+                "stop_loss_pct": b.stop_loss_pct,
+                "max_holding_days": b.max_holding_days,
+                "slots": b.slots,
+                "used": used.get(b.name, 0),
+                "free": max(0, b.slots - used.get(b.name, 0)),
+            }
+            for b in BUCKETS
+        ],
         "candidates": candidates,
         "excluded_candidates": {
             "reason": (

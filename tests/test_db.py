@@ -1,6 +1,7 @@
 import os
 from datetime import date
 
+import psycopg
 import pytest
 
 from investment.config import SCREEN
@@ -90,3 +91,46 @@ def test_record_gap_writes_a_single_row(conn):
     """1件だけ記録する既存の呼び出し方も従来どおり動くこと。"""
     record_gap(conn, scope="price:7203.T", detail="株価が取れません")
     assert _gaps(conn) == [("price:7203.T", "株価が取れません")]
+
+
+def test_migrations_backfill_the_bucket_of_existing_proposals(conn):
+    """v3 で追加した bucket 列が、既存の行にも埋まること。
+
+    v1/v2 の提案は +22%/-8% で出したものなので「じっくり」に当たる。
+    不明として NULL のまま残すと、枠ごとの集計から黙って漏れる。
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO proposals
+                (created_at, symbol, action, quantity, entry_price, take_profit,
+                 stop_loss, required_win_rate, rationale, scenario, confidence,
+                 strategy_tag, bucket, rule_version, journal_path)
+            VALUES (NOW(), '1111.T', 'buy', 100, 1200, 1464, 1104, 0.2667,
+                    'x', 'y', 'mid', 'z', 'じっくり', 'v3', 'journal/x.md')
+            """
+        )
+        cur.execute("ALTER TABLE proposals ALTER COLUMN bucket DROP NOT NULL")
+        cur.execute("UPDATE proposals SET bucket = NULL")
+    conn.commit()
+
+    apply_migrations(conn)  # 再適用で埋め直される
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT bucket FROM proposals")
+        assert [r["bucket"] for r in cur.fetchall()] == ["じっくり"]
+
+
+def test_migrations_reject_an_unknown_bucket_name(conn):
+    """知らない枠の名前は保存できないこと（打ち間違いを防ぐ）。"""
+    with conn.cursor() as cur, pytest.raises(psycopg.errors.CheckViolation):
+        cur.execute(
+            """
+            INSERT INTO proposals
+                (created_at, symbol, action, quantity, entry_price, take_profit,
+                 stop_loss, required_win_rate, rationale, scenario, confidence,
+                 strategy_tag, bucket, rule_version, journal_path)
+            VALUES (NOW(), '1111.T', 'buy', 100, 1200, 1464, 1104, 0.2667,
+                    'x', 'y', 'mid', 'z', 'なんとなく', 'v3', 'journal/x.md')
+            """
+        )
