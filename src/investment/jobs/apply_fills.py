@@ -54,16 +54,6 @@ def _bucket_of_proposal(conn, proposal_id) -> str | None:
     return row["bucket"] if row else None
 
 
-def _mark_proposal_taken(conn, proposal_id) -> None:
-    if proposal_id is None:
-        return
-    with conn.cursor() as cur:
-        cur.execute(
-            "UPDATE proposals SET outcome = 'taken' WHERE id = %s", (proposal_id,)
-        )
-    conn.commit()
-
-
 def run(conn, today: date) -> tuple[int, int]:
     """未反映の申告を古い順に反映する。戻り値は (反映できた件数, できなかった件数)。
 
@@ -95,6 +85,12 @@ def run(conn, today: date) -> tuple[int, int]:
             else:
                 result = apply_sell(existing, fill, opened_at, today)
 
+            # 買いは、同じトランザクションの中で提案（proposals）も
+            # 「実行した」（outcome = 'taken'）にする。反映だけ終わって
+            # 提案が pending のまま残ると、スマホの画面に「まだ買って
+            # いない提案」として同じ銘柄がまた出てしまい、二重に買う
+            # 事故につながる。売りは提案を経由しないことがあるので渡さない。
+            proposal_id = row["proposal_id"] if fill["side"] == "buy" else None
             save_fill_result(
                 conn,
                 row["id"],
@@ -102,21 +98,20 @@ def run(conn, today: date) -> tuple[int, int]:
                 result.cash_delta,
                 result.trade,
                 fill["currency"],
+                proposal_id=proposal_id,
             )
         except FillError as exc:
-            # save_fill_result が現金の反映に失敗して例外を出した場合、
-            # そこまでに書いた取引・保有はまだコミットされていない。
-            # ここで rollback しないと、直後の mark_fill_failed の commit が
-            # その未確定分もろとも確定させてしまい、「現金だけ動かない」
-            # という一番避けたい壊れ方になる。
+            # save_fill_result が現金の反映などに失敗して例外を出した場合、
+            # そこまでに書いた取引・保有・提案の更新はまだコミットされて
+            # いない。ここで rollback しないと、直後の mark_fill_failed の
+            # commit がその未確定分もろとも確定させてしまい、「現金だけ
+            # 動かない」という一番避けたい壊れ方になる。
             conn.rollback()
             failed += 1
             mark_fill_failed(conn, row["id"], str(exc))
             print(f"反映できません #{row['id']} {fill['symbol']}: {exc}")
             continue
 
-        if fill["side"] == "buy":
-            _mark_proposal_taken(conn, row["proposal_id"])
         ok += 1
         print(
             f"反映しました #{row['id']} {fill['symbol']} {fill['side']} "

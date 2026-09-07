@@ -5,7 +5,9 @@ from datetime import date
 
 import pytest
 
-from investment.db import apply_migrations, connect, init_cash
+from investment.config import bucket_by_name
+from investment.db import apply_migrations, connect, init_cash, save_fill_result
+from investment.fills import apply_buy
 from investment.jobs.apply_fills import run
 
 pytestmark = pytest.mark.integration
@@ -107,6 +109,81 @@ def test_applying_a_buy_marks_the_proposal_as_taken(conn):
         assert cur.fetchone()["outcome"] == "taken"
 
 
+def test_a_failed_proposal_update_leaves_no_trade_and_no_position_either(conn):
+    """提案を taken にする更新が失敗したら、取引も保有も残さないこと。
+
+    以前の作りは、反映（取引・保有・現金・fills）と「提案を taken に
+    する」更新が別々のトランザクションだった。反映が終わった直後に
+    プロセスが落ちると、反映は完了しているのに提案だけ pending の
+    まま残り、スマホの画面に同じ提案が「まだ買っていない提案」として
+    また出てきて、二重に買う事故につながっていた。
+
+    ここでは提案の更新だけをデータベースのトリガーでわざと失敗させ、
+    反映（取引・保有・現金）が提案の更新と運命を共にする ―
+    つまり同じトランザクションに入っている ― ことを、実際の
+    データベースの状態で確かめる。
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            CREATE FUNCTION test_block_proposal_taken() RETURNS trigger AS $$
+            BEGIN
+                RAISE EXCEPTION 'test: 提案の更新をわざと失敗させる';
+            END;
+            $$ LANGUAGE plpgsql
+            """
+        )
+        cur.execute(
+            """
+            CREATE TRIGGER test_block_proposal_taken
+            BEFORE UPDATE ON proposals
+            FOR EACH ROW EXECUTE FUNCTION test_block_proposal_taken()
+            """
+        )
+    conn.commit()
+
+    try:
+        pid = _proposal(conn, "1111.T", "じっくり")
+        fid = _fill(
+            conn, proposal_id=pid, symbol="1111.T", side="buy", quantity=100, price=900
+        )
+
+        rule = bucket_by_name("じっくり")
+        result = apply_buy(
+            None,
+            {
+                "symbol": "1111.T", "side": "buy", "quantity": 100, "price": 900,
+                "currency": "JPY", "fee": 0,
+            },
+            rule,
+            550_000,
+        )
+
+        with pytest.raises(Exception):  # noqa: B017 - トリガーが投げる例外を確認したいだけ
+            save_fill_result(
+                conn, fid, result.position, result.cash_delta, result.trade,
+                "JPY", proposal_id=pid,
+            )
+        conn.rollback()  # ジョブ本体（run）が失敗時に必ず行うのと同じ後始末
+
+        s = _state(conn)
+        assert s["positions"] == []   # 保有が作られたままになっていないこと
+        assert s["trades"] == []      # 取引が残ったままになっていないこと
+        assert s["cash"] == 550_000   # 現金も動いていないこと
+
+        with conn.cursor() as cur:
+            cur.execute("SELECT applied_at FROM fills WHERE id = %s", (fid,))
+            assert cur.fetchone()["applied_at"] is None   # 未反映のまま
+
+            cur.execute("SELECT outcome FROM proposals WHERE id = %s", (pid,))
+            assert cur.fetchone()["outcome"] == "pending"
+    finally:
+        with conn.cursor() as cur:
+            cur.execute("DROP TRIGGER IF EXISTS test_block_proposal_taken ON proposals")
+            cur.execute("DROP FUNCTION IF EXISTS test_block_proposal_taken()")
+        conn.commit()
+
+
 def test_applying_a_sell_removes_the_position_and_adds_the_cash(conn):
     pid = _proposal(conn, "1111.T", "じっくり")
     _fill(conn, proposal_id=pid, symbol="1111.T", side="buy", quantity=100, price=900)
@@ -196,3 +273,11 @@ def test_a_missing_cash_row_leaves_the_fill_unapplied_with_a_reason(conn):
     s = _state(conn)
     assert s["positions"] == []   # 保有も作られていないこと（全部取り消し）
     assert s["trades"] == []      # 取引も残っていないこと（全部取り消し）
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT outcome FROM proposals WHERE id = %s", (pid,))
+        # 提案も pending のまま残ること。反映は同じトランザクションで
+        # 提案を taken にするところまで含むので、現金が原因で全体が
+        # 取り消されるなら提案も一緒に取り消される。ここで taken に
+        # なっていたら、反映されていないのに実行済み扱いになる欠陥。
+        assert cur.fetchone()["outcome"] == "pending"

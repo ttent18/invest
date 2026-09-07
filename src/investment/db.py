@@ -218,6 +218,7 @@ def save_fill_result(
     cash_delta: float,
     trade: dict,
     currency: str,
+    proposal_id: int | None = None,
 ) -> None:
     """1件の申告の反映を、まとめて1つのトランザクションで書き込む。
 
@@ -225,6 +226,13 @@ def save_fill_result(
     途中で止まると帳尻が合わなくなるため、必ず全部成功か全部取り消しにする。
 
     position が None なら、その銘柄の保有を削除する（全部売った場合）。
+
+    proposal_id を渡すと、その提案も同じトランザクションで「実行した」
+    （outcome = 'taken'）にする。反映と別のトランザクションにすると、
+    反映は終わったのに提案だけ pending のまま残る隙間ができ、
+    スマホの画面に「まだ買っていない提案」として同じ銘柄が
+    再び出て、二重に買う事故につながる。売り（proposal_id が None）は
+    提案を経由しないので、その場合は何もしない。
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -283,4 +291,8 @@ def save_fill_result(
             "UPDATE fills SET applied_at = NOW(), apply_error = NULL WHERE id = %s",
             (fill_id,),
         )
+        if proposal_id is not None:
+            cur.execute(
+                "UPDATE proposals SET outcome = 'taken' WHERE id = %s", (proposal_id,)
+            )
     conn.commit()
