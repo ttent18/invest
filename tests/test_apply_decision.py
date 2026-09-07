@@ -14,7 +14,7 @@ CTX = {
     # 日本株は100株単位でしか買えない。1銘柄上限は 550,000円 × 25% = 137,500円
     # なので、100株で収まる株価（1,375円以下）を基準の銘柄にしてある。
     "candidates": [{"symbol": "3993.T", "last_price": 1200.0}],
-    "rule_version": "v1",
+    "rule_version": "v2",
     # 保有無し。売りの検証テストは各テストの中で positions を差し替えて行う。
     "positions": [],
 }
@@ -103,6 +103,8 @@ def test_accepts_entry_price_at_plus_10_percent_boundary():
         quantity=100,
     )
     assert validate(d, CTX, SETTINGS) == []
+    # 次に出せる株数(200株)は上限を超えるので却下される
+    assert validate(dict(d, quantity=200), CTX, SETTINGS) != []
 
 
 def test_accepts_entry_price_at_minus_10_percent_boundary():
@@ -519,3 +521,64 @@ def test_us_stocks_are_not_subject_to_the_100_share_unit():
         quantity=137,  # 日本株なら却下される端数だが、米国株では正当
     )
     assert validate(d, ctx, SETTINGS) == []
+
+
+# --- 却下理由が事実と合っていること -----------------------------------------
+
+
+def test_rejection_says_risk_limit_when_the_stop_is_too_wide():
+    """損切り幅が広くて買えない場合に、金額の上限のせいだと言わないこと。
+
+    株数が0になる理由は2つある。(1) 1銘柄の金額上限、(2) 1回の損失上限。
+    どちらでも「金額の上限を超える」と言っていたため、100株で130,000円
+    （上限137,500円以内）なのに「上限を超える」という、それ自体で
+    矛盾しているメッセージが出ていた。
+    """
+    # 損切りが -9.2%（ルールの -8% より広い）。金額は上限内だが損失が上限を超える
+    d = good(entry_price=1300.0, take_profit=1300.0 * 1.22, stop_loss=1180.0, quantity=100)
+    ctx = dict(CTX, candidates=[{"symbol": "3993.T", "last_price": 1300.0}])
+    errors = validate(d, ctx, SETTINGS)
+
+    assert any("損失" in e for e in errors), errors
+    # 金額の上限を超えていないのに「金額の上限」と言ってはいけない
+    assert not any("1銘柄の上限" in e for e in errors), errors
+
+
+def test_rejection_says_position_limit_when_one_lot_costs_too_much():
+    """金額の上限で買えない場合は、金額の上限だと言うこと。"""
+    d = good(entry_price=2704.0, take_profit=2704.0 * 1.22, stop_loss=2704.0 * 0.92,
+             quantity=100, symbol="3723.T")
+    ctx = dict(CTX, candidates=[{"symbol": "3723.T", "last_price": 2704.0}])
+    errors = validate(d, ctx, SETTINGS)
+
+    assert any("1銘柄の上限" in e for e in errors), errors
+
+
+# --- 売りも100株単位 --------------------------------------------------------
+
+
+def test_rejects_partial_sell_that_is_not_a_multiple_of_the_lot_size():
+    """保有100株のうち50株だけ売る、という注文は出せないので却下する。
+
+    買いと同じ理由。単元未満株（S株）は逆指値が使えないため v2 で使わないと
+    決めており、売りも100株単位でしか注文できない。
+    """
+    ctx = dict(CTX, positions=[{"symbol": "3993.T", "quantity": 100}])
+    errors = validate(good_sell(quantity=50), ctx, SETTINGS)
+    assert any("100株単位" in e for e in errors), errors
+
+
+def test_accepts_partial_sell_of_a_whole_number_of_lots():
+    """300株保有のうち100株だけ売るのは正当。"""
+    ctx = dict(CTX, positions=[{"symbol": "3993.T", "quantity": 300}])
+    assert validate(good_sell(quantity=100), ctx, SETTINGS) == []
+
+
+def test_accepts_selling_the_entire_holding_even_if_it_is_not_a_whole_lot():
+    """保有株数そのものが単元未満でも、全部売るのは常に可能。
+
+    端株（株式分割などで生じる100株未満の保有）は、まとめてなら売却できる。
+    「全部売る」を却下すると、持ち続けるしかなくなってしまう。
+    """
+    ctx = dict(CTX, positions=[{"symbol": "3993.T", "quantity": 37}])
+    assert validate(good_sell(quantity=37), ctx, SETTINGS) == []

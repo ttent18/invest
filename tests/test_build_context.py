@@ -39,7 +39,7 @@ def test_assemble_includes_candidates_and_constraints():
 
 
 def test_assemble_reports_no_room_when_positions_are_full():
-    full = [{"symbol": f"{i}.T"} for i in range(5)]
+    full = [{"symbol": f"{i}.T"} for i in range(4)]  # max_positions=4 が境界
     ctx = assemble([], full, {"JPY": 0}, SETTINGS, SCREEN, dropped=[])
     assert ctx["can_open_new"] is False
 
@@ -145,7 +145,7 @@ def test_main_closes_the_connection_before_fetching_prices(tmp_path):
 
 
 def test_main_does_not_reopen_the_connection_when_nothing_failed(tmp_path):
-    """株価が全件取れた日は、書き込みのために接続を開き直さないこと。"""
+    """株価が全件取れて除外も無い日は、書き込みのために接続を開き直さないこと。"""
     calls: list[str] = []
 
     class FakeConn:
@@ -161,7 +161,8 @@ def test_main_does_not_reopen_the_connection_when_nothing_failed(tmp_path):
         patch("investment.jobs.build_context.select_screened", return_value=[{"symbol": "1111.T"}]),
         patch("investment.jobs.build_context.select_positions", return_value=[]),
         patch("investment.jobs.build_context.select_cash", return_value={"JPY": 550_000}),
-        patch("investment.jobs.build_context.fetch_last_price", return_value=1500.0),
+        # 100株で120,000円。上限137,500円に収まるので除外されない
+        patch("investment.jobs.build_context.fetch_last_price", return_value=1200.0),
         patch("investment.jobs.build_context.record_gaps") as record,
         patch("investment.jobs.build_context.OUTPUT", tmp_path / "context.json"),
     ):
@@ -234,3 +235,70 @@ def test_the_rule_version_has_a_matching_rules_document():
     """
     doc = Path(__file__).resolve().parents[1] / "rules" / f"{RULE_VERSION}.md"
     assert doc.exists(), f"{doc} がありません。ルールを変えたら理由を書くこと"
+
+
+def test_kept_candidates_carry_the_highest_usable_entry_price():
+    """買値をいくらまで上げられるかをAIに渡すこと。
+
+    AIは last_price の ±10% の範囲で買値を決めてよいことになっている。
+    しかし max_quantity は last_price を基準に計算した値なので、
+    買値を上げると同じ株数では金額の上限を超えてしまう。
+    日本株は100株単位なので「1株減らす」ができず、指示どおりに答えた提案が
+    まるごと却下される。株価1,250円超の候補すべてで起きる（実測の中央値は1,318円）。
+
+    そこで「この株数を保ったまま出せる買値の上限」を計算して渡す。
+    """
+    kept, _ = drop_unaffordable([{"symbol": "1111.T", "last_price": 1300.0}], SETTINGS)
+
+    assert kept[0]["max_quantity"] == 100
+    # 137,500円 ÷ 100株 = 1,375円 まで
+    assert kept[0]["max_entry_price"] == 1375.0
+    # この買値・この株数なら上限ちょうどに収まる
+    assert kept[0]["max_entry_price"] * kept[0]["max_quantity"] <= 550_000 * 0.25
+
+
+def test_max_entry_price_is_rounded_down_to_stay_within_the_limit():
+    """割り切れない場合は切り捨てる。切り上げると上限を超えてしまう。"""
+    # 306円 → max_quantity=400 → 137,500 ÷ 400 = 343.75 → 343円
+    kept, _ = drop_unaffordable([{"symbol": "5137.T", "last_price": 306.0}], SETTINGS)
+    assert kept[0]["max_quantity"] == 400
+    assert kept[0]["max_entry_price"] == 343.0
+    assert kept[0]["max_entry_price"] * kept[0]["max_quantity"] <= 550_000 * 0.25
+
+
+def test_main_records_the_excluded_candidates_in_the_database(tmp_path):
+    """買えないので外した銘柄を、あとから数えられる形で残すこと。
+
+    context.json は git 管理外で毎回上書きされ、実行ログも Actions の保持期間で
+    消える。「あの日は何件が買えなくて外れたのか」を後から測れるよう、
+    株価が取れなかった件と同じく data_gaps に残す。
+    """
+    class FakeConn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    with (
+        patch("investment.jobs.build_context.connect", side_effect=lambda: FakeConn()),
+        patch(
+            "investment.jobs.build_context.select_screened",
+            return_value=[{"symbol": "1111.T"}, {"symbol": "2222.T"}],
+        ),
+        patch("investment.jobs.build_context.select_positions", return_value=[]),
+        patch("investment.jobs.build_context.select_cash", return_value={"JPY": 550_000}),
+        patch(
+            "investment.jobs.build_context.fetch_last_price",
+            side_effect=lambda s: 1200.0 if s == "1111.T" else 2704.0,
+        ),
+        patch("investment.jobs.build_context.record_gaps") as record,
+        patch("investment.jobs.build_context.OUTPUT", tmp_path / "context.json"),
+    ):
+        assert main() == 0
+
+    recorded = record.call_args.args[1]
+    assert len(recorded) == 1
+    scope, detail = recorded[0]
+    assert scope == "candidate_unaffordable:2222.T"
+    assert "270,400" in detail  # 100株の金額

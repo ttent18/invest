@@ -19,6 +19,7 @@ Neon(利用しているデータベース)は、数分間アクセスが無い�
 """
 
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -88,13 +89,22 @@ def drop_unaffordable(
     初回運用では、AIが41件の候補のうち5件しか調べきれないまま、
     どちらも発注できない2銘柄を提案した。買えないものは先に外す。
     """
+    # 注意: この比較は株価が円建てであることを前提にしている。
+    # 米国株（ドル建て）を候補に入れる場合は、ここで為替換算が必要になる。
+    # 現在スクリーニングの対象は日本株のみなので、まだ問題は起きていない。
     limit = settings.total_capital * settings.max_position_pct
     kept, dropped = [], []
     for c in candidates:
         unit = lot_size(c["symbol"])
         lot_cost = float(c["last_price"]) * unit
         if lot_cost <= limit:
-            kept.append({**c, "lot_size": unit, "max_quantity": _max_quantity(c, settings, unit)})
+            quantity = _max_quantity(c, settings, unit)
+            kept.append({
+                **c,
+                "lot_size": unit,
+                "max_quantity": quantity,
+                "max_entry_price": _max_entry_price(quantity, limit),
+            })
         else:
             dropped.append({**c, "lot_size": unit, "lot_cost": lot_cost})
     if dropped:
@@ -120,6 +130,24 @@ def _max_quantity(candidate: dict, settings: Settings, unit: int) -> int:
         price * (1 - settings.stop_loss_pct),
         lot_size=unit,
     )
+
+
+def _max_entry_price(max_quantity: int, limit: float) -> float:
+    """max_quantity 株を保ったまま出せる買値の上限を返す。
+
+    AIは買値を last_price の ±10% の範囲で決めてよいことになっている。
+    しかし max_quantity は last_price を基準に計算した株数なので、
+    買値を上げると同じ株数では金額の上限を超えてしまう。日本株は100株単位で
+    「1株だけ減らす」ができないため、指示どおりに答えた提案がまるごと
+    却下されることになる（2026-09-07 のレビューで判明）。
+
+    そこで「その株数のまま出せる買値の上限」を計算して渡し、
+    買値を上げるなら株数を1単元減らす必要があることを分かるようにする。
+    切り上げると上限を超えてしまうため、1円未満は切り捨てる。
+    """
+    if max_quantity <= 0:
+        return 0.0
+    return math.floor(limit / max_quantity)
 
 
 def assemble(
@@ -182,7 +210,20 @@ def main() -> int:
     # 2b. 1単元すら買えない銘柄を外す（AIに調べさせても発注できないため）
     priced_candidates, dropped = drop_unaffordable(priced_candidates, SETTINGS)
 
-    # 3. 取れなかった事実を記録する（接続を開き直す）
+    # 3. 外した事実を記録する（接続を開き直す）。
+    #    context.json は git 管理外で毎回上書きされ、実行ログも消えるため、
+    #    「何が候補から外れたのか」を後から数えられるのはここだけになる。
+    cap = SETTINGS.total_capital * SETTINGS.max_position_pct
+    gaps = gaps + [
+        (
+            f"candidate_unaffordable:{d['symbol']}",
+            (
+                f"{d['symbol']} は{d['lot_size']}株で {d['lot_cost']:,.0f}円 になり、"
+                f"1銘柄の上限 {cap:,.0f}円 を超えるため候補から外しました"
+            ),
+        )
+        for d in dropped
+    ]
     if gaps:
         with connect() as conn:
             record_gaps(conn, gaps)

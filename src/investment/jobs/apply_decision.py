@@ -153,11 +153,23 @@ def validate(decision: dict, ctx: dict, settings: Settings) -> list[str]:
                     f"（日本株は{unit}株単位でしか注文できません）"
                 )
             if allowed == 0:
-                errors.append(
-                    f"{decision['symbol']} は{unit}株で {entry * unit:,.0f}円 になり、"
-                    f"1銘柄の上限 {settings.total_capital * settings.max_position_pct:,.0f}円 "
-                    f"を超えるため買えません"
-                )
+                # 買えない理由は2つある。どちらなのかを見て言い分けること。
+                # まとめて「金額の上限を超える」と言うと、金額は上限内なのに
+                # 「上限を超える」と告げる、それ自体で矛盾したメッセージになる。
+                cap_amount = settings.total_capital * settings.max_position_pct
+                risk_amount = settings.total_capital * settings.risk_per_trade_pct
+                if entry * unit > cap_amount:
+                    errors.append(
+                        f"{decision['symbol']} は{unit}株で {entry * unit:,.0f}円 になり、"
+                        f"1銘柄の上限 {cap_amount:,.0f}円 を超えるため買えません"
+                    )
+                else:
+                    errors.append(
+                        f"{decision['symbol']} は{unit}株だと損切りまでの損失が "
+                        f"{(entry - sl) * unit:,.0f}円 になり、1回の損失上限 "
+                        f"{risk_amount:,.0f}円 を超えるため買えません"
+                        f"（損切りの幅が広すぎます）"
+                    )
             elif quantity > allowed:
                 errors.append(f"quantity {quantity} が上限 {allowed} 株を超えています")
 
@@ -181,6 +193,18 @@ def validate(decision: dict, ctx: dict, settings: Settings) -> list[str]:
                 errors.append(
                     f"{decision['symbol']} の売却株数 {requested} が保有株数 {held} を"
                     f"超えています（保有株数: {held}, 売却しようとした株数: {requested}）"
+                )
+            # 売りも買いと同じく単元単位でしか注文できない。100株のうち50株だけ
+            # 売る、という注文は出せない（v2 で単元未満株は使わないと決めたため）。
+            # ただし「保有している分を全部売る」は常に可能。株式分割などで
+            # 100株未満の端株を持つことがあり、それを売れないと持ち続けるしか
+            # なくなってしまう。
+            unit = lot_size(decision["symbol"])
+            if unit > 1 and requested != held and requested % unit != 0:
+                errors.append(
+                    f"売却株数 {requested} は{unit}株単位ではありません"
+                    f"（日本株は{unit}株単位でしか注文できません。"
+                    f"保有している {held} 株を全部売る場合を除きます）"
                 )
 
     return errors
