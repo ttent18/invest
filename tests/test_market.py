@@ -179,3 +179,53 @@ def test_fetch_last_price_raises_on_network_failure():
         pytest.raises(MarketDataError),
     ):
         fetch_last_price("7203")
+
+
+from datetime import date as _date
+
+from investment.market import fetch_range
+
+
+def _range_stub(highs: list[float], lows: list[float]) -> pd.DataFrame:
+    return pd.DataFrame({"High": highs, "Low": lows})
+
+
+def test_fetch_range_returns_period_high_and_low():
+    # 期間内で最高値・最安値が別々の日にあっても正しく拾えること（先頭行だけを見ない）
+    ticker = MagicMock()
+    ticker.history.return_value = _range_stub(
+        highs=[2500.0, 2600.0, 2400.0], lows=[2450.0, 2550.0, 2200.0]
+    )
+    with patch("investment.market.yf.Ticker", return_value=ticker):
+        high, low = fetch_range("7203.T", _date(2026, 9, 1), _date(2026, 9, 3))
+
+    assert high == 2600.0
+    assert low == 2200.0
+
+
+def test_fetch_range_calls_history_once():
+    # 銘柄あたりの通信回数を1回に抑える
+    ticker = MagicMock()
+    ticker.history.return_value = _range_stub([2500.0], [2450.0])
+    with patch("investment.market.yf.Ticker", return_value=ticker):
+        fetch_range("7203.T", _date(2026, 9, 1), _date(2026, 9, 5))
+
+    ticker.history.assert_called_once()
+
+
+def test_fetch_range_raises_when_history_is_empty():
+    ticker = MagicMock()
+    ticker.history.return_value = pd.DataFrame()
+    with (
+        patch("investment.market.yf.Ticker", return_value=ticker),
+        pytest.raises(MarketDataError),
+    ):
+        fetch_range("7203.T", _date(2026, 9, 1), _date(2026, 9, 3))
+
+
+def test_fetch_range_raises_on_network_failure():
+    with (
+        patch("investment.market.yf.Ticker", side_effect=OSError("network down")),
+        pytest.raises(MarketDataError),
+    ):
+        fetch_range("7203.T", _date(2026, 9, 1), _date(2026, 9, 3))

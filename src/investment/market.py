@@ -128,15 +128,19 @@ def fetch_last_price(code: str) -> float:
     return price
 
 
-def fetch_daily_range(symbol: str, day: date) -> tuple[float, float]:
-    """指定日の高値と安値を返す。取れなければ MarketDataError。"""
+def fetch_range(symbol: str, start: date, end: date) -> tuple[float, float]:
+    """[start, end]（両端含む）の期間内の最高値・最安値を返す。取れなければ MarketDataError。
+
+    yfinance の呼び出しは1回のみ（銘柄あたりの通信回数を抑えるため）。
+    単一日の値動きが欲しい場合は start == end を渡せばよい。
+    """
     try:
         hist = yf.Ticker(symbol).history(
-            start=day.isoformat(), end=(day + timedelta(days=1)).isoformat()
+            start=start.isoformat(), end=(end + timedelta(days=1)).isoformat()
         )
     except Exception as exc:
-        raise MarketDataError(f"{symbol} の {day} の値動きを取得できません") from exc
+        raise MarketDataError(f"{symbol} の {start}〜{end} の値動きを取得できません") from exc
 
     if hist.empty:
-        raise MarketDataError(f"{symbol} の {day} のデータがありません")
-    return float(hist["High"].iloc[0]), float(hist["Low"].iloc[0])
+        raise MarketDataError(f"{symbol} の {start}〜{end} のデータがありません")
+    return float(hist["High"].max()), float(hist["Low"].min())
