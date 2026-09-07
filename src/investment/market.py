@@ -1,5 +1,6 @@
 """株価と財務データの取得。判定は行わない。"""
 
+import math
 from dataclasses import dataclass
 
 import yfinance as yf
@@ -49,20 +50,6 @@ class MarketDataError(RuntimeError):
     """
 
 
-def _equity_ratio(balance_sheet) -> float | None:
-    """貸借対照表から自己資本比率を計算する。取れなければ None。"""
-    if balance_sheet is None or getattr(balance_sheet, "empty", True):
-        return None
-    try:
-        equity = float(balance_sheet.loc["Stockholders Equity"].iloc[0])
-        total = float(balance_sheet.loc["Total Assets"].iloc[0])
-    except (KeyError, IndexError, TypeError, ValueError):
-        return None
-    if total == 0:
-        return None
-    return equity / total
-
-
 def _as_float(value) -> float | None:
     if value is None:
         return None
@@ -70,7 +57,26 @@ def _as_float(value) -> float | None:
         f = float(value)
     except (TypeError, ValueError):
         return None
-    return None if f != f else f  # NaN を除く
+    return None if math.isnan(f) else f  # NaN を除く
+
+
+def _equity_ratio(balance_sheet) -> float | None:
+    """貸借対照表から自己資本比率を計算する。取れなければ None。
+
+    値が NaN の場合も None にする（NaN は「取得できた」ことにしない）。
+    """
+    if balance_sheet is None or getattr(balance_sheet, "empty", True):
+        return None
+    try:
+        raw_equity = balance_sheet.loc["Stockholders Equity"].iloc[0]
+        raw_total = balance_sheet.loc["Total Assets"].iloc[0]
+    except (KeyError, IndexError):
+        return None
+    equity = _as_float(raw_equity)
+    total = _as_float(raw_total)
+    if equity is None or total is None or total == 0:
+        return None
+    return equity / total
 
 
 def fetch_fundamentals(code: str) -> Fundamentals:
@@ -85,7 +91,9 @@ def fetch_fundamentals(code: str) -> Fundamentals:
         info = ticker.info or {}
         balance = ticker.balance_sheet
     except Exception as exc:  # yfinance は多様な例外を投げる
-        raise MarketDataError(f"{symbol} の取得に失敗しました") from exc
+        # 元の例外の型名を含めることで、通信失敗とプログラミングエラー（属性名の
+        # タイプミス、yfinance の API 変更など）を後から区別できるようにする。
+        raise MarketDataError(f"{symbol} の取得に失敗しました ({type(exc).__name__}: {exc})") from exc
 
     return Fundamentals(
         symbol=symbol,

@@ -3,6 +3,7 @@
 条件の出典と採用理由は設計書 15.8 を参照。
 """
 
+import math
 from dataclasses import dataclass
 
 from investment.config import ScreenCriteria
@@ -19,14 +20,19 @@ def evaluate(f: Fundamentals, c: ScreenCriteria) -> ScreenResult:
     """5条件で判定する。取得できなかった項目は通過させない。"""
     reasons: list[str] = []
 
+    def _unavailable(value: float | None) -> bool:
+        # NaN は「取得できた」ことにしない。None と同じ扱いにする
+        # （nan < limit も nan > limit も False になるため、そのままでは素通りしてしまう）
+        return value is None or math.isnan(value)
+
     def check_max(value: float | None, limit: float, label: str, fmt: str) -> None:
-        if value is None:
+        if _unavailable(value):
             reasons.append(f"{label}が取得できません")
         elif value > limit:
             reasons.append(f"{label} {fmt.format(value)} が上限 {fmt.format(limit)} を超えています")
 
     def check_min(value: float | None, limit: float, label: str, fmt: str) -> None:
-        if value is None:
+        if _unavailable(value):
             reasons.append(f"{label}が取得できません")
         elif value < limit:
             reasons.append(f"{label} {fmt.format(value)} が下限 {fmt.format(limit)} を下回ります")

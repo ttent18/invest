@@ -82,6 +82,7 @@ def test_fetch_fundamentals_maps_fields():
     assert f.name == "PKSHA TECHNOLOGY INC"
     assert f.market_cap == 98_297_651_200
     assert f.revenue_growth == 0.811
+    assert f.operating_margin == 0.13829
     assert f.roe == 0.07741
     assert f.equity_ratio == pytest.approx(0.6343, abs=0.0005)
 
@@ -96,6 +97,32 @@ def test_fetch_fundamentals_returns_none_for_missing_fields():
 
 
 def test_fetch_fundamentals_raises_on_network_failure():
-    with patch("investment.market.yf.Ticker", side_effect=OSError("network down")):
-        with pytest.raises(MarketDataError):
-            fetch_fundamentals("7203")
+    with (
+        patch("investment.market.yf.Ticker", side_effect=OSError("network down")),
+        pytest.raises(MarketDataError),
+    ):
+        fetch_fundamentals("7203")
+
+
+def test_fetch_fundamentals_equity_ratio_none_when_equity_is_nan():
+    # 貸借対照表の自己資本が NaN のとき、equity_ratio は None であるべき（0や誤った値を返してはならない）
+    balance = pd.DataFrame(
+        {"2026-03-31": [54_368_529_000, float("nan")]},
+        index=["Total Assets", "Stockholders Equity"],
+    )
+    with patch("investment.market.yf.Ticker", return_value=_ticker_stub({}, balance)):
+        f = fetch_fundamentals("3993")
+
+    assert f.equity_ratio is None
+
+
+def test_fetch_fundamentals_equity_ratio_none_when_total_assets_is_nan():
+    # 総資産が NaN のときも同様に None であるべき
+    balance = pd.DataFrame(
+        {"2026-03-31": [float("nan"), 34_483_425_000]},
+        index=["Total Assets", "Stockholders Equity"],
+    )
+    with patch("investment.market.yf.Ticker", return_value=_ticker_stub({}, balance)):
+        f = fetch_fundamentals("3993")
+
+    assert f.equity_ratio is None
