@@ -245,31 +245,65 @@ def record_rejections(conn, rejected: list[tuple[str, list[str]]]) -> None:
         record_gap(conn, scope=f"proposal_rejected:{symbol}", detail="; ".join(errors))
 
 
+def record_no_proposals(conn, ctx: dict, decisions: list[dict]) -> None:
+    """分析を実行したのに提案が1件も出なかった事実を data_gaps に記録する。
+
+    これまでは accepted も rejected も0件だと、DBに一切書き込まずに終了して
+    いた（呼び出し元で `if accepted or rejected:` と接続ごとスキップしていた）。
+    却下された提案は data_gaps に残るのに、「候補が来なかった日」や
+    「候補はあったがAIが1件も判断を出さなかった日」は無記録で消えていた。
+    このシステムの目的は測定であり、記録が欠けた期間があるとその期間の
+    解釈ができなくなるため、ここで記録する。
+
+    「候補が0件だった」のか「候補はあったがAIが全部見送った」のかを区別
+    できるよう、候補件数・保有件数・decisions件数をすべて detail に含める。
+    """
+    detail = (
+        f"候補 {len(ctx['candidates'])} 件 / 保有 {len(ctx['positions'])} 件 に対し、"
+        f"AIが出した decisions は {len(decisions)} 件でした（採用・却下とも0件）。"
+    )
+    print(detail)
+    record_gap(conn, scope="analysis:no_proposals", detail=detail)
+
+
+def process(
+    conn, ctx: dict, decisions: list[dict], journal_path: str, settings: Settings
+) -> tuple[int, int]:
+    """decisions を検証し、結果に応じて proposals / data_gaps に記録する。
+
+    戻り値は (採用件数, 却下件数)。
+    """
+    accepted, rejected = [], []
+    for d in decisions:
+        errors = validate(d, ctx, settings)
+        if errors:
+            rejected.append((d.get("symbol", "?"), errors))
+        else:
+            accepted.append(enrich(d, ctx, settings))
+
+    for symbol, errors in rejected:
+        print(f"却下 {symbol}: {'; '.join(errors)}")
+
+    if accepted:
+        insert_proposals(conn, accepted, journal_path)
+    if rejected:
+        record_rejections(conn, rejected)
+    if not accepted and not rejected:
+        record_no_proposals(conn, ctx, decisions)
+
+    print(f"採用 {len(accepted)} 件 / 却下 {len(rejected)} 件")
+    return len(accepted), len(rejected)
+
+
 def main() -> int:
     ctx = json.loads(Path("build/context.json").read_text(encoding="utf-8"))
     raw = json.loads(Path("build/decision.json").read_text(encoding="utf-8"))
     decisions = raw.get("decisions", [])
     journal_path = raw.get("journal_path", "")
 
-    accepted, rejected = [], []
-    for d in decisions:
-        errors = validate(d, ctx, SETTINGS)
-        if errors:
-            rejected.append((d.get("symbol", "?"), errors))
-        else:
-            accepted.append(enrich(d, ctx, SETTINGS))
+    with connect() as conn:
+        process(conn, ctx, decisions, journal_path, SETTINGS)
 
-    for symbol, errors in rejected:
-        print(f"却下 {symbol}: {'; '.join(errors)}")
-
-    if accepted or rejected:
-        with connect() as conn:
-            if accepted:
-                insert_proposals(conn, accepted, journal_path)
-            if rejected:
-                record_rejections(conn, rejected)
-
-    print(f"採用 {len(accepted)} 件 / 却下 {len(rejected)} 件")
     return 0
 
 

@@ -6,6 +6,7 @@ dependencies = [
     "yfinance>=0.2.50",
     "psycopg[binary]>=3.2",
     "python-dotenv>=1.0",
+    "openpyxl>=3.1.5",
 ]
 
 [dependency-groups]
@@ -15,7 +16,7 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+pythonpath = ["src", "scripts"]
 testpaths = ["tests"]
 markers = [
     "integration: 実際のDBやネットワークを使うテスト",

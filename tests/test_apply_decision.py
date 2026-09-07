@@ -286,6 +286,116 @@ def test_record_rejections_writes_to_data_gaps():
     assert "stop_loss < entry_price < take_profit である必要があります" in detail
 
 
+# --- 修正2: 候補0件・decisions0件の日が data_gaps に記録されない問題 ---
+#
+# これまでは accepted も rejected も0件だと DB に一切書き込まずに終了していた
+# (`if accepted or rejected:` で接続ごとスキップ)。つまり「候補が0件だった」
+# 「候補はあったがAIが全部見送った」のどちらの日も無記録で消えていた。
+# process() はこの2ケースを区別できる detail を付けて data_gaps に記録する。
+
+
+def _patched_record_gap():
+    from unittest.mock import patch
+
+    calls = []
+
+    def fake_record_gap(conn, scope, detail):
+        calls.append((scope, detail))
+
+    return patch("investment.jobs.apply_decision.record_gap", side_effect=fake_record_gap), calls
+
+
+def test_process_records_gap_when_no_candidates_and_no_decisions():
+    from investment.jobs.apply_decision import process
+
+    ctx = {
+        "can_open_new": True,
+        "candidates": [],
+        "positions": [],
+        "rule_version": "v1",
+    }
+    patcher, calls = _patched_record_gap()
+    with patcher:
+        process(None, ctx, [], "journal/2026-09-07.md", SETTINGS)
+
+    assert len(calls) == 1
+    scope, detail = calls[0]
+    assert scope == "analysis:no_proposals"
+    assert "候補 0" in detail  # 候補0件であることが detail から読み取れる
+
+
+def test_process_records_gap_when_candidates_present_but_zero_decisions():
+    from investment.jobs.apply_decision import process
+
+    ctx = {
+        "can_open_new": True,
+        "candidates": [{"symbol": "3993.T", "last_price": 2450.0}],
+        "positions": [],
+        "rule_version": "v1",
+    }
+    patcher, calls = _patched_record_gap()
+    with patcher:
+        process(None, ctx, [], "journal/2026-09-07.md", SETTINGS)
+
+    assert len(calls) == 1
+    scope, detail = calls[0]
+    assert scope == "analysis:no_proposals"
+    assert "候補 1" in detail  # 候補1件だったことが detail から読み取れる
+
+
+def test_no_candidates_and_candidates_present_cases_are_distinguishable():
+    from investment.jobs.apply_decision import process
+
+    ctx_empty = {"can_open_new": True, "candidates": [], "positions": [], "rule_version": "v1"}
+    ctx_with_candidates = {
+        "can_open_new": True,
+        "candidates": [{"symbol": "3993.T", "last_price": 2450.0}],
+        "positions": [],
+        "rule_version": "v1",
+    }
+
+    patcher1, calls1 = _patched_record_gap()
+    with patcher1:
+        process(None, ctx_empty, [], "journal/2026-09-07.md", SETTINGS)
+
+    patcher2, calls2 = _patched_record_gap()
+    with patcher2:
+        process(None, ctx_with_candidates, [], "journal/2026-09-07.md", SETTINGS)
+
+    detail_empty = calls1[0][1]
+    detail_with_candidates = calls2[0][1]
+    assert detail_empty != detail_with_candidates
+
+
+def test_process_does_not_record_gap_when_something_accepted():
+    from unittest.mock import patch
+
+    from investment.jobs.apply_decision import process
+
+    patcher, calls = _patched_record_gap()
+    with patcher, patch("investment.jobs.apply_decision.insert_proposals") as fake_insert:
+        process(None, CTX, [good()], "journal/2026-09-07.md", SETTINGS)
+
+    assert calls == []
+    fake_insert.assert_called_once()
+
+
+def test_process_does_not_record_gap_when_something_rejected():
+    from unittest.mock import patch
+
+    from investment.jobs.apply_decision import process
+
+    bad_decision = good()
+    del bad_decision["stop_loss"]
+
+    patcher, calls = _patched_record_gap()
+    with patcher, patch("investment.jobs.apply_decision.record_rejections") as fake_reject:
+        process(None, CTX, [bad_decision], "journal/2026-09-07.md", SETTINGS)
+
+    assert calls == []
+    fake_reject.assert_called_once()
+
+
 # --- insert_proposals: 検証済みの判断が実際にDBへ保存されることの確認 ---
 
 TEST_URL = os.environ.get("DATABASE_URL_TEST")
