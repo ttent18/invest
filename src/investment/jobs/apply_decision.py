@@ -1,0 +1,161 @@
+"""AIが出した判断を検証し、妥当なものだけを proposals に保存する。
+
+AIの出力を信用しない。制約の適用はここで行う。
+"""
+
+import json
+import sys
+from pathlib import Path
+
+from investment.config import SETTINGS, Settings
+from investment.db import connect
+from investment.market import is_japanese
+from investment.sizing import position_size, required_win_rate
+
+REQUIRED_FIELDS = (
+    "symbol", "action", "entry_price", "take_profit", "stop_loss",
+    "quantity", "rationale", "scenario", "confidence", "strategy_tag",
+)
+VALID_CONFIDENCE = {"low", "mid", "high"}
+VALID_ACTION = {"buy", "sell"}
+
+# entry_price(AIが自己申告した買値)は、そのままでは信用できない。
+# AIは銘柄を勘違いしたり、桁を間違えたりすることがあるため、実際の市場価格
+# (candidates の last_price)と比べて大きくズレていないかをここで確認する。
+# 許容幅を設けているのは、株価は取引時間中ずっと動いているため、コンテキスト
+# 生成時点の last_price と多少ズレるのは正常な誤差だから。
+# 10%は「通常の値動きは許容しつつ、明らかな間違い(例: 桁違い)は弾く」ための
+# 目安として選んだ値。
+ENTRY_PRICE_TOLERANCE = 0.10
+
+
+def validate(decision: dict, ctx: dict, settings: Settings) -> list[str]:
+    """判断が制約を満たすか調べる。問題があればメッセージを返す。"""
+    errors: list[str] = []
+
+    for field in REQUIRED_FIELDS:
+        if field not in decision:
+            errors.append(f"{field} がありません")
+    if errors:
+        return errors
+
+    if decision["action"] not in VALID_ACTION:
+        errors.append(f"action は {VALID_ACTION} のいずれかである必要があります")
+    if decision["confidence"] not in VALID_CONFIDENCE:
+        errors.append(f"confidence は {VALID_CONFIDENCE} のいずれかである必要があります")
+    if not str(decision["rationale"]).strip():
+        errors.append("rationale が空です")
+    if not str(decision["scenario"]).strip():
+        errors.append("scenario が空です")
+
+    entry = float(decision["entry_price"])
+    tp = float(decision["take_profit"])
+    sl = float(decision["stop_loss"])
+    if not (sl < entry < tp):
+        errors.append("stop_loss < entry_price < take_profit である必要があります")
+
+    if decision["action"] == "buy":
+        candidates_by_symbol = {c["symbol"]: c for c in ctx["candidates"]}
+        candidate = candidates_by_symbol.get(decision["symbol"])
+
+        if candidate is None:
+            errors.append(f"{decision['symbol']} はスクリーニングの候補に含まれていません")
+        elif "last_price" not in candidate:
+            errors.append(
+                f"{decision['symbol']} の候補データに last_price (実際の株価) がありません"
+            )
+        else:
+            last_price = float(candidate["last_price"])
+            lower = last_price * (1 - ENTRY_PRICE_TOLERANCE)
+            upper = last_price * (1 + ENTRY_PRICE_TOLERANCE)
+            if not (lower <= entry <= upper):
+                errors.append(
+                    f"entry_price {entry} が実際の株価 {last_price} から "
+                    f"±{ENTRY_PRICE_TOLERANCE:.0%} を超えて離れています"
+                    f"（実際の株価: {last_price}, 提案された買値: {entry}）"
+                )
+
+        if not ctx["can_open_new"]:
+            errors.append("同時保有の上限に達しているため新規に買えません")
+
+        if sl < entry:
+            allowed = position_size(
+                settings.total_capital,
+                settings.risk_per_trade_pct,
+                settings.max_position_pct,
+                entry,
+                sl,
+            )
+            if int(decision["quantity"]) > allowed:
+                errors.append(
+                    f"quantity {decision['quantity']} が上限 {allowed} 株を超えています"
+                )
+
+    return errors
+
+
+def enrich(decision: dict, settings: Settings) -> dict:
+    """必要勝率を計算して付け加える。"""
+    fee = settings.jp_fee_rate if is_japanese(decision["symbol"]) else settings.us_fee_rate
+    decision["required_win_rate"] = required_win_rate(
+        float(decision["entry_price"]),
+        float(decision["take_profit"]),
+        float(decision["stop_loss"]),
+        fee,
+    )
+    return decision
+
+
+def insert_proposals(conn, decisions: list[dict], journal_path: str) -> int:
+    """検証済みの判断を保存する。"""
+    sql = """
+        INSERT INTO proposals
+            (created_at, symbol, action, quantity, entry_price, take_profit, stop_loss,
+             required_win_rate, rationale, scenario, confidence, strategy_tag,
+             rule_version, journal_path)
+        VALUES (NOW(), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    """
+    with conn.cursor() as cur:
+        cur.executemany(
+            sql,
+            [
+                (
+                    d["symbol"], d["action"], d["quantity"], d["entry_price"],
+                    d["take_profit"], d["stop_loss"], d["required_win_rate"],
+                    d["rationale"], d["scenario"], d["confidence"], d["strategy_tag"],
+                    d.get("rule_version", "v1"), journal_path,
+                )
+                for d in decisions
+            ],
+        )
+    conn.commit()
+    return len(decisions)
+
+
+def main() -> int:
+    ctx = json.loads(Path("build/context.json").read_text(encoding="utf-8"))
+    raw = json.loads(Path("build/decision.json").read_text(encoding="utf-8"))
+    decisions = raw.get("decisions", [])
+    journal_path = raw.get("journal_path", "")
+
+    accepted, rejected = [], []
+    for d in decisions:
+        errors = validate(d, ctx, SETTINGS)
+        if errors:
+            rejected.append((d.get("symbol", "?"), errors))
+        else:
+            accepted.append(enrich(d, SETTINGS))
+
+    for symbol, errors in rejected:
+        print(f"却下 {symbol}: {'; '.join(errors)}")
+
+    if accepted:
+        with connect() as conn:
+            insert_proposals(conn, accepted, journal_path)
+
+    print(f"採用 {len(accepted)} 件 / 却下 {len(rejected)} 件")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
