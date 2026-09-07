@@ -123,10 +123,9 @@ export async function postFill(body) {
 
 // POST /api/proposals/{id}/skip — 「見送る」を記録する。
 //
-// 現在の functions/api/proposals/[id]/skip.js は送信内容（本文）を一切
-// 読まない実装になっている。理由（reason）を渡しても、いまはサーバー側で
-// 保存されない。それでも、利用者に理由を考えさせること自体に意味があり、
-// 将来サーバー側が対応したときにそのまま活きるよう、渡せる形にしておく。
+// 理由（reason）は functions/api/proposals/[id]/skip.js が
+// proposals.skip_reason に保存する。利用者に理由を考えさせること自体にも
+// 意味があるので、空でも送る。
 export async function postSkip(proposalId, reason) {
   const result = await postJson(`/api/proposals/${proposalId}/skip`, { reason });
   if (!result.ok) {
@@ -301,39 +300,8 @@ export function distancePct(fromPrice, toPrice) {
   return (toPrice - fromPrice) / fromPrice;
 }
 
-// 回転枠の「期限」表示のための、保有を始めてからの経過営業日数。
-//
-// **重要な注意（機能不足の告知）**: /api/state の positions には
-// 保有を始めた日時（opened_at）はあるが、経過営業日そのものは入っていない
-// （functions/_shared/state.js を確認したがそのような項目は無い）。
-// 表示のためにここで数える。ただし、このファイルには祝日カレンダーが
-// 無いため、**土日だけを除き、日本の祝日は考慮できない。**
-// そのため、祝日がある週をまたぐ保有は、実際の営業日経過数より
-// 「多め」に数えてしまう方向にずれる（少なく数えて期限切れを
-// 見逃す方向には、ずれない）。回転枠の期限は「値動きに関係なく降りる」
-// ための注意喚起なので、早めに出る分には実害が小さいと判断した。
-//
-// nowIso は state.generated_at（サーバーの時計）を渡すこと。
-// 端末の時計をそのまま信用しない。
-export function businessDaysElapsed(openedAtIso, nowIso) {
-  if (!openedAtIso || !nowIso) return null;
-  const start = new Date(openedAtIso);
-  const end = new Date(nowIso);
-  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return null;
-
-  const JST_OFFSET_MS = 9 * 60 * 60 * 1000;
-  const MS_PER_DAY = 24 * 60 * 60 * 1000;
-  // functions/_shared/state.js の jstDayNumber と同じ考え方（日本時間の
-  // カレンダー日だけを見て、時刻は無視する）。
-  const jstDayNumber = (d) => Math.floor((d.getTime() + JST_OFFSET_MS) / MS_PER_DAY);
-
-  const startDay = jstDayNumber(start);
-  const endDay = jstDayNumber(end);
-  let count = 0;
-  for (let day = startDay + 1; day <= endDay; day++) {
-    const utcMsOfThatJstMidnight = day * MS_PER_DAY - JST_OFFSET_MS;
-    const dow = new Date(utcMsOfThatJstMidnight).getUTCDay(); // 0=日, 6=土
-    if (dow !== 0 && dow !== 6) count++;
-  }
-  return count;
-}
+// 回転枠の「期限」表示に使う business_days_held / days_left は、
+// いまは /api/state（positions[].business_days_held / days_left）が
+// 計算して返すので、この画面側では計算しない（functions/_shared/state.js
+// 参照）。以前はここに祝日を考慮できない自前の計算があったが、
+// サーバー側に移した。

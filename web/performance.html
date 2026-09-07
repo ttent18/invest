@@ -63,19 +63,28 @@
           card.appendChild(row);
         }
 
-        // 初期資金（最初に入金した額）は /api/state に含まれていない
-        // （src/investment/config.py の SETTINGS.initial_capital のみに
-        // ある値で、画面側には渡ってきていない）。画面のJavaScriptに
-        // この金額を書き写すと、初期資金を変えたときにここだけ古いまま
-        // 残る事故につながる（総資金が直書きになっている既知の問題と
-        // 同じ形）ので、書き写さずに「出せません」と正直に表示する。
+        // 「初期資金から」の増減 = 最初に入金した額(initial_capital)から
+        // いまの合計(capital)がいくら増減したか。/api/state が
+        // profit_since_start としてすでに計算して返す
+        // （functions/_shared/state.js。capital - initial_capital の
+        // 引き算だけなので、画面側でやり直さない）。
+        const profitSinceStart = typeof state.profit_since_start === "number" ? state.profit_since_start : null;
+        const profitClass =
+          profitSinceStart !== null && profitSinceStart > 0
+            ? "figure-value-profit"
+            : profitSinceStart !== null && profitSinceStart < 0
+              ? "figure-value-loss"
+              : "";
         const initialRow = document.createElement("div");
         initialRow.className = "money-row";
-        initialRow.innerHTML = `<div class="money-label">初期資金から</div><div class="money-value">—</div>`;
+        initialRow.innerHTML = `<div class="money-label">初期資金から</div><div class="money-value ${profitClass}">${signedYen(profitSinceStart)}</div>`;
         card.appendChild(initialRow);
         const initialNote = document.createElement("p");
         initialNote.className = "hint-text";
-        initialNote.textContent = "初期資金の記録がこの画面にはまだ無いため、増減を出せません。";
+        initialNote.textContent =
+          typeof state.initial_capital === "number"
+            ? `最初に入れた ${yen(state.initial_capital)} から、いまいくら増減したかです。`
+            : "初期資金の記録が出せなかったため、増減を出せません。";
         card.appendChild(initialNote);
 
         // 確定した損益 = 枠ごとの合計損益の合計。

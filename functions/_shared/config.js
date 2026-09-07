@@ -7,7 +7,9 @@
 //
 // **この値は必ず src/investment/config.py の BUCKETS / SETTINGS と
 // 同じにすること。** 片方だけを直しても、どちらのプログラムもエラーには
-// ならない（動くが数字が食い違う）。率を変えるときは両方を直すこと。
+// ならない（動くが数字が食い違う）。率だけでなく、初期資金
+// （SETTINGS.initial_capital）のような金額もこの警告の対象。
+// 値を変えるときは両方を直すこと。
 
 export const BUCKETS = [
   {
@@ -30,10 +32,13 @@ export const BUCKETS = [
 // （config.py の MAX_POSITIONS と同じ考え方）。
 export const MAX_POSITIONS = BUCKETS.reduce((sum, b) => sum + b.slots, 0);
 
-// config.py の SETTINGS のうち、画面が必要とする2つだけを写す。
+// config.py の SETTINGS のうち、画面が必要とする3つだけを写す。
+// initial_capital も含め、**この値は必ず src/investment/config.py の
+// SETTINGS と同じにすること**（ファイル冒頭の警告の対象）。
 export const SETTINGS = {
   max_position_pct: 0.25,
   risk_per_trade_pct: 0.02,
+  initial_capital: 550000, // src/investment/config.py の Settings.initial_capital と同じ（円）
 };
 
 // この枠が損益トントン（勝っても負けてもいない状態）になる勝率。

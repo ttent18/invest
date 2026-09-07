@@ -37,7 +37,6 @@
         renderNav,
         signedYen,
         distancePct,
-        businessDaysElapsed,
       } from "/app.js";
 
       // 回転枠の期限（rules/v3.md）。/api/state の positions には
@@ -190,11 +189,18 @@
       // 1件の保有カードを組み立てる。ここで例外が出ても、呼び出し側
       // （renderMain）が1件ずつ try/catch しているので、他の保有の表示は
       // 巻き添えにならない。
-      function renderPositionCard(position, generatedAt) {
+      function renderPositionCard(position) {
         const hasLastPrice = position.last_price !== null && position.last_price !== undefined;
         const isRotation = position.max_holding_days !== null && position.max_holding_days !== undefined;
-        const elapsedDays = isRotation ? businessDaysElapsed(position.opened_at, generatedAt) : null;
-        const isOverdue = isRotation && elapsedDays !== null && elapsedDays > position.max_holding_days;
+        // 経過営業日・期限までの残り営業日は /api/state がすでに計算して
+        // 返す（functions/_shared/state.js）。ここでは受け取った値を
+        // そのまま使うだけで、日数を数え直さない。
+        const elapsedDays = position.business_days_held ?? null;
+        const daysLeft = position.days_left ?? null;
+        // ちょうど期限（10営業日）たった日を含めて期限切れ扱いにする
+        // （functions/_shared/state.js・morning_check.py と同じ境目。
+        // days_left が 0 以下なら期限切れ）。
+        const isOverdue = isRotation && daysLeft !== null && daysLeft <= 0;
 
         const card = document.createElement("div");
         card.className = "card" + (isOverdue ? " card-danger" : "");
@@ -277,13 +283,17 @@
         card.appendChild(stopFigures);
 
         // 回転枠の期限（まだ期限切れではない場合の、控えめな表示）
+        //
+        // 「回転枠」は、値動きに関係なく決まった日数で結論を出す枠
+        // （もう1つの「じっくり枠」には期限が無い）。ここでの「日」は
+        // 平日（営業日）だけを数える。
         if (isRotation && !isOverdue) {
           const note = document.createElement("p");
           note.className = "hint-text";
           note.textContent =
-            elapsedDays === null
-              ? "回転枠：期限までの経過日数が出せませんでした"
-              : `回転枠：${elapsedDays}営業日経過 / 期限${position.max_holding_days}営業日`;
+            elapsedDays === null || daysLeft === null
+              ? "回転枠：期限までの日数が出せませんでした"
+              : `回転枠：あと${daysLeft}営業日で期限（${elapsedDays}営業日経過 / 期限${position.max_holding_days}営業日）`;
           card.appendChild(note);
         }
 
@@ -318,7 +328,7 @@
         } else {
           for (const position of positions) {
             try {
-              main.appendChild(renderPositionCard(position, state.generated_at));
+              main.appendChild(renderPositionCard(position));
             } catch (err) {
               console.error("保有カードの表示に失敗しました", err);
               const bad = document.createElement("div");

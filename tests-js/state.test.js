@@ -219,6 +219,73 @@ describe("提案（pending の一覧）", () => {
   });
 });
 
+describe("初期資金からの増減（profit_since_start）", () => {
+  it("initial_capital を返す（config.js の SETTINGS.initial_capital）", () => {
+    expect(buildState(base()).initial_capital).toBe(550000);
+  });
+
+  it("capital が 570,000 のとき profit_since_start は 20,000（capital - initial_capital の引き算だけ）", () => {
+    const state = buildState(base({ capital: 570000 }));
+    expect(state.profit_since_start).toBe(20000);
+  });
+
+  it("capital が分からなければ profit_since_start も null（0ではない）", () => {
+    const state = buildState(base({ capital: null }));
+    expect(state.profit_since_start).toBe(null);
+  });
+});
+
+describe("回転枠の期限（business_days_held / days_left）", () => {
+  // NOW は 2026-09-08T01:30:00.000Z = JST 2026-09-08 10:30（火曜）。
+
+  function position(overrides = {}) {
+    return {
+      symbol: "156A.T", bucket: "回転", quantity: 100, avg_price: "899",
+      take_profit: "988.9", stop_loss: "854.05", opened_at: "2026-09-07T00:00:00Z", // JST 2026-09-07 09:00（月曜）
+      last_price: null, last_price_at: null,
+      ...overrides,
+    };
+  }
+
+  it("買った日の翌日が平日なら business_days_held は 1", () => {
+    // 月曜に買って、翌営業日の火曜（NOW）に見ている。
+    const state = buildState(base({ positionRows: [position()] }));
+    expect(state.positions[0].business_days_held).toBe(1);
+  });
+
+  it("金曜に買って月曜に見たら business_days_held は 1（土日を飛ばす）", () => {
+    const state = buildState(
+      base({
+        now: new Date("2026-09-14T01:30:00.000Z"), // JST 2026-09-14 10:30（月曜）
+        positionRows: [position({ opened_at: "2026-09-11T00:00:00Z" })], // JST 2026-09-11 09:00（金曜）
+      })
+    );
+    expect(state.positions[0].business_days_held).toBe(1);
+  });
+
+  it("回転枠でちょうど10営業日たったら days_left が 0（1 ではない）", () => {
+    // 2026-09-07（月）から10営業日後 = 2026-09-21（月）。
+    const state = buildState(
+      base({
+        now: new Date("2026-09-21T01:30:00.000Z"), // JST 2026-09-21 10:30（月曜）
+        positionRows: [position()],
+      })
+    );
+    expect(state.positions[0].business_days_held).toBe(10);
+    expect(state.positions[0].days_left).toBe(0);
+  });
+
+  it("じっくり枠は days_left が null（期限が無いため）", () => {
+    const state = buildState(
+      base({
+        positionRows: [position({ bucket: "じっくり" })],
+      })
+    );
+    expect(state.positions[0].days_left).toBe(null);
+    expect(state.positions[0].business_days_held).toBe(1);
+  });
+});
+
 describe("未反映の記録（fills）", () => {
   it("行をそのまま返す。IDはJSONの数値にする", () => {
     const fills = buildState(
