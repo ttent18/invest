@@ -91,11 +91,45 @@ def validate(decision: dict, ctx: dict, settings: Settings) -> list[str]:
                     f"quantity {decision['quantity']} が上限 {allowed} 株を超えています"
                 )
 
+    elif decision["action"] == "sell":
+        # 買いだけ疑って売りを信用する理由はない。AIが保有していない銘柄を
+        # 売ったり、保有株数を超える株数を売ったりしていないかをここで確認する。
+        # 必要なデータ(現在の保有)は ctx["positions"] に既にある。
+        #
+        # 保有銘柄の現在値がコンテキストに無いため、entry_price の±10%チェック
+        # (買いで行っているもの)は売りには実装しない。別途取得が必要になり
+        # 範囲が広がるため、ここでは見送る。
+        positions_by_symbol = {p["symbol"]: p for p in ctx["positions"]}
+        position = positions_by_symbol.get(decision["symbol"])
+
+        if position is None:
+            errors.append(f"{decision['symbol']} を保有していないため売却できません")
+        else:
+            held = int(position["quantity"])
+            requested = int(decision["quantity"])
+            if requested > held:
+                errors.append(
+                    f"{decision['symbol']} の売却株数 {requested} が保有株数 {held} を"
+                    f"超えています（保有株数: {held}, 売却しようとした株数: {requested}）"
+                )
+
     return errors
 
 
-def enrich(decision: dict, settings: Settings) -> dict:
-    """必要勝率を計算して付け加える。"""
+def enrich(decision: dict, ctx: dict, settings: Settings) -> dict:
+    """必要勝率と rule_version を付け加える。
+
+    rule_version は ctx（build_context.py が生成したコンテキスト。実際に
+    使われたルールのバージョンを持つ）から取る。AIが出した decision の
+    中身は信用しないという本モジュールの方針上、rule_version もAIの出力
+    ではなく ctx の値をそのまま使う（AIがこのフィールドを書いてきても
+    上書きする）。
+
+    ctx に rule_version が無い場合、"v1" 等に静かにフォールバックすると、
+    本当のバージョンが分からないまま proposals に記録されてしまい、
+    設計書16章が求める「バージョン別の成績比較」が気づかれないまま壊れる。
+    そのため、無い場合はここで例外にして早期に気づけるようにする。
+    """
     fee = settings.jp_fee_rate if is_japanese(decision["symbol"]) else settings.us_fee_rate
     decision["required_win_rate"] = required_win_rate(
         float(decision["entry_price"]),
@@ -103,11 +137,21 @@ def enrich(decision: dict, settings: Settings) -> dict:
         float(decision["stop_loss"]),
         fee,
     )
+    if "rule_version" not in ctx:
+        raise KeyError("ctx に rule_version がありません。rule_version を記録できません。")
+    decision["rule_version"] = ctx["rule_version"]
     return decision
 
 
 def insert_proposals(conn, decisions: list[dict], journal_path: str) -> int:
-    """検証済みの判断を保存する。"""
+    """検証済みの判断を保存する。
+
+    各 decision は事前に enrich() 済みで、"rule_version"（AIの出力ではなく
+    ctx 由来の実際のルールバージョン）を持っている前提。ここで "v1" 等に
+    フォールバックしてしまうと、enrich() が rule_version を正しく設定して
+    いてもその値を隠してしまうため、フォールバックは行わず decision の
+    値をそのまま使う。
+    """
     sql = """
         INSERT INTO proposals
             (created_at, symbol, action, quantity, entry_price, take_profit, stop_loss,
@@ -123,7 +167,7 @@ def insert_proposals(conn, decisions: list[dict], journal_path: str) -> int:
                     d["symbol"], d["action"], d["quantity"], d["entry_price"],
                     d["take_profit"], d["stop_loss"], d["required_win_rate"],
                     d["rationale"], d["scenario"], d["confidence"], d["strategy_tag"],
-                    d.get("rule_version", "v1"), journal_path,
+                    d["rule_version"], journal_path,
                 )
                 for d in decisions
             ],
@@ -144,7 +188,7 @@ def main() -> int:
         if errors:
             rejected.append((d.get("symbol", "?"), errors))
         else:
-            accepted.append(enrich(d, SETTINGS))
+            accepted.append(enrich(d, ctx, SETTINGS))
 
     for symbol, errors in rejected:
         print(f"却下 {symbol}: {'; '.join(errors)}")

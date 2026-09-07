@@ -4,7 +4,7 @@ import pytest
 
 from investment.config import SETTINGS
 from investment.db import apply_migrations, connect
-from investment.jobs.apply_decision import insert_proposals, validate
+from investment.jobs.apply_decision import enrich, insert_proposals, validate
 
 CTX = {
     "can_open_new": True,
@@ -12,6 +12,8 @@ CTX = {
     # ズレのテストは各テストの中で candidates を差し替えて行う。
     "candidates": [{"symbol": "3993.T", "last_price": 2450.0}],
     "rule_version": "v1",
+    # 保有無し。売りの検証テストは各テストの中で positions を差し替えて行う。
+    "positions": [],
 }
 
 
@@ -129,6 +131,60 @@ def test_rejects_when_last_price_missing_from_candidate():
     assert any("last_price" in e for e in errors)
 
 
+# --- rule_version: ctx の値がそのまま記録されること(AIの出力やハードコードに
+# 依存しない)を確認するテスト ---
+
+
+def test_enrich_sets_rule_version_from_ctx():
+    ctx = dict(CTX, rule_version="v2")
+    d = enrich(good(), ctx, SETTINGS)
+    assert d["rule_version"] == "v2"
+
+
+def test_enrich_does_not_hardcode_v1_when_ctx_has_different_version():
+    # ctx が "v1" 以外を持っているのに "v1" になってしまうリグレッションを防ぐ。
+    ctx = dict(CTX, rule_version="v3-experimental")
+    d = enrich(good(), ctx, SETTINGS)
+    assert d["rule_version"] == "v3-experimental"
+
+
+def test_enrich_raises_when_ctx_missing_rule_version():
+    # rule_version が無いまま "v1" 等にフォールバックすると、本当のバージョンが
+    # わからないまま記録されてしまう(バージョン別成績比較が静かに壊れる)。
+    # そのため、無い場合は早期に気づけるよう例外にする。
+    ctx = {k: v for k, v in CTX.items() if k != "rule_version"}
+    with pytest.raises(KeyError):
+        enrich(good(), ctx, SETTINGS)
+
+
+# --- 売り注文の検証: 保有していない銘柄・保有株数を超える売りを却下する ---
+
+
+def good_sell(**overrides) -> dict:
+    d = good(action="sell", quantity=10)
+    d.update(overrides)
+    return d
+
+
+def test_accepts_sell_of_exact_held_quantity():
+    # 境界: 保有株数ちょうどの売りは通る
+    ctx = dict(CTX, positions=[{"symbol": "3993.T", "quantity": 10}])
+    assert validate(good_sell(quantity=10), ctx, SETTINGS) == []
+
+
+def test_rejects_sell_of_symbol_not_held():
+    ctx = dict(CTX, positions=[])
+    errors = validate(good_sell(), ctx, SETTINGS)
+    assert any("保有" in e for e in errors)
+
+
+def test_rejects_sell_exceeding_held_quantity():
+    ctx = dict(CTX, positions=[{"symbol": "3993.T", "quantity": 5}])
+    errors = validate(good_sell(quantity=10), ctx, SETTINGS)
+    # 却下メッセージに保有株数(5)と売却しようとした株数(10)の両方が含まれる
+    assert any("5" in e and "10" in e for e in errors)
+
+
 # --- insert_proposals: 検証済みの判断が実際にDBへ保存されることの確認 ---
 
 TEST_URL = os.environ.get("DATABASE_URL_TEST")
@@ -150,6 +206,9 @@ def conn():
 def test_insert_proposals_saves_validated_decision(conn):
     d = good()
     d["required_win_rate"] = 0.2667
+    # enrich() を経由しない単体テストなので、enrich が付与するはずの
+    # rule_version をここで手動で用意する(required_win_rate と同じ扱い)。
+    d["rule_version"] = "v1"
 
     inserted = insert_proposals(conn, [d], journal_path="journal/2026-09-07.md")
 
@@ -165,3 +224,20 @@ def test_insert_proposals_saves_validated_decision(conn):
     assert row["confidence"] == "mid"
     assert row["outcome"] == "pending"
     assert row["journal_path"] == "journal/2026-09-07.md"
+    assert row["rule_version"] == "v1"
+
+
+@pytest.mark.integration
+def test_insert_proposals_saves_rule_version_from_context_not_hardcoded_v1(conn):
+    # 修正1の回帰テスト: ctx["rule_version"] が "v2" のとき、DBに保存される
+    # 値も "v2" になること("v1" にならないこと)を確認する。
+    d = good()
+    d["required_win_rate"] = 0.2667
+    d["rule_version"] = "v2"
+
+    insert_proposals(conn, [d], journal_path="journal/2026-09-07.md")
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT rule_version FROM proposals")
+        row = cur.fetchone()
+    assert row["rule_version"] == "v2"
