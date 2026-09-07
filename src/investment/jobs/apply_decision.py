@@ -454,8 +454,44 @@ def process(
     if not accepted and not rejected:
         record_no_proposals(conn, ctx, decisions)
 
+    # 日誌が書かれたかを確かめる。判断だけ残って理由が残らないのを防ぐ。
+    journal_gap = check_journal_covers(Path(journal_path), accepted)
+    if journal_gap is not None:
+        print(f"注意: {journal_gap[1]}")
+        record_gap(conn, scope=journal_gap[0], detail=journal_gap[1])
+
     print(f"採用 {len(accepted)} 件 / 却下 {len(rejected)} 件")
     return len(accepted), len(rejected)
+
+
+def check_journal_covers(path: Path, accepted: list[dict]) -> tuple[str, str] | None:
+    """採用した銘柄が日誌に書かれているかを見る。書かれていなければ記録を返す。
+
+    2026-09-07 に、AIが decision.json は書いたのに日誌を書かないまま
+    「成功」で終わった。判断は残るが「なぜそう判断したか」が残らない。
+    この仕組みは判断そのものより、判断の理由と振り返りが溜まることに
+    価値があるので、書かれていない事実を見逃さない。
+
+    判断そのものは正しいので却下はしない。data_gaps に残すだけにする。
+    """
+    if not accepted:
+        return None
+    if not path.exists():
+        detail = (
+            f"採用した {len(accepted)} 件について、日誌 {path} が作られませんでした"
+            "（判断は保存しましたが、その理由と振り返りが残っていません）"
+        )
+        return ("journal:missing", detail)
+
+    text = path.read_text(encoding="utf-8")
+    missing = [d["symbol"] for d in accepted if d["symbol"] not in text]
+    if not missing:
+        return None
+    detail = (
+        f"日誌 {path} に、採用した銘柄 {', '.join(missing)} が出てきません"
+        "（判断は保存しましたが、その銘柄を選んだ理由が残っていません）"
+    )
+    return ("journal:incomplete", detail)
 
 
 def load_decision(path: Path) -> tuple[list[dict], str, tuple[str, str] | None]:

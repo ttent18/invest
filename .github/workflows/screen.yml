@@ -19,6 +19,16 @@ jobs:
         with:
           python-version: "3.12"
       - run: uv sync
+
+      - name: データベースの構造を最新にする
+        # 列を足したなどの変更を、データを読み書きする前に必ず適用する。
+        # これが無いと、変更した日に本番だけが古い構造のまま動き、
+        # 「そんな列は無い」で止まる（2026-09-07 に発生）。
+        run: uv run python -m investment.jobs.migrate
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          PYTHONPATH: src
+
       - run: uv run python -m investment.jobs.run_screen
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}

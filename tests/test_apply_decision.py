@@ -380,14 +380,21 @@ def test_no_candidates_and_candidates_present_cases_are_distinguishable():
     assert detail_empty != detail_with_candidates
 
 
-def test_process_does_not_record_gap_when_something_accepted():
+def test_process_does_not_record_gap_when_something_accepted(tmp_path):
+    """採用があった日は「候補0件」の記録を作らないこと。
+
+    日誌チェックとは別の話なので、日誌は採用銘柄を含むものを用意する
+    （用意しないと日誌チェックのほうが記録を作り、何を見ているのか
+    分からないテストになる）。
+    """
     from unittest.mock import patch
 
     from investment.jobs.apply_decision import process
 
+    journal = _journal_for(tmp_path, ["3993.T"])
     patcher, calls = _patched_record_gap()
     with patcher, patch("investment.jobs.apply_decision.insert_proposals") as fake_insert:
-        process(None, CTX, [good()], "journal/2026-09-07.md", SETTINGS)
+        process(None, CTX, [good()], journal, SETTINGS)
 
     assert calls == []
     fake_insert.assert_called_once()
@@ -838,7 +845,14 @@ def test_validate_stops_at_the_overall_limit_across_buckets():
     assert any("空き" in e for e in errors), errors
 
 
-def test_process_rejects_the_third_buy_into_a_two_slot_bucket():
+def _journal_for(tmp_path, symbols) -> str:
+    """採用する銘柄が出てくる日誌を用意する（日誌チェックを通すため）。"""
+    j = tmp_path / "journal.md"
+    j.write_text("# 判断\n\n" + "\n".join(f"{s} について" for s in symbols), encoding="utf-8")
+    return str(j)
+
+
+def test_process_rejects_the_third_buy_into_a_two_slot_bucket(tmp_path):
     """本番の経路（process）で、空き2の枠に3件出したら3件目が却下されること。
 
     これが指摘の本体。validate を1件ずつ呼ぶだけでは止まらなかった。
@@ -848,12 +862,13 @@ def test_process_rejects_the_third_buy_into_a_two_slot_bucket():
     ctx = _ctx_with_buckets()
     ctx["candidates"] = [{"symbol": f"{i}.T", "last_price": 1200.0} for i in range(1, 4)]
     decisions = [_patient(symbol=f"{i}.T") for i in range(1, 4)]
+    journal = _journal_for(tmp_path, [f"{i}.T" for i in range(1, 4)])
 
     with (
         patch("investment.jobs.apply_decision.insert_proposals") as insert,
         patch("investment.jobs.apply_decision.record_rejections") as reject,
     ):
-        accepted, rejected = process(None, ctx, decisions, "journal/x.md", SETTINGS)
+        accepted, rejected = process(None, ctx, decisions, journal, SETTINGS)
 
     assert (accepted, rejected) == (2, 1)
     assert [d["symbol"] for d in insert.call_args.args[1]] == ["1.T", "2.T"]
@@ -862,7 +877,7 @@ def test_process_rejects_the_third_buy_into_a_two_slot_bucket():
     assert reject.call_args.args[1][0][0] == "3.T"
 
 
-def test_process_counts_the_two_buckets_separately():
+def test_process_counts_the_two_buckets_separately(tmp_path):
     """枠が違えば、それぞれの空き枠まで通ること。"""
     from unittest.mock import patch
 
@@ -873,16 +888,17 @@ def test_process_counts_the_two_buckets_separately():
         _fast(symbol="3.T"), _fast(symbol="4.T"),
     ]
 
+    journal = _journal_for(tmp_path, [f"{i}.T" for i in range(1, 5)])
     with (
         patch("investment.jobs.apply_decision.insert_proposals"),
         patch("investment.jobs.apply_decision.record_rejections"),
     ):
-        accepted, rejected = process(None, ctx, decisions, "journal/x.md", SETTINGS)
+        accepted, rejected = process(None, ctx, decisions, journal, SETTINGS)
 
     assert (accepted, rejected) == (4, 0)
 
 
-def test_process_records_a_sell_whose_bucket_disagreed_with_the_holding():
+def test_process_records_a_sell_whose_bucket_disagreed_with_the_holding(tmp_path):
     """AIが保有と違う枠を書いたら、保存はするが記録も残すこと。
 
     保有側が正なので上書きして保存する（却下しない）。ただし黙って直すと、
@@ -897,7 +913,9 @@ def test_process_records_a_sell_whose_bucket_disagreed_with_the_holding():
         patch("investment.jobs.apply_decision.insert_proposals") as insert,
         patch("investment.jobs.apply_decision.record_rejections") as record,
     ):
-        accepted, rejected = process(None, ctx, [d], "journal/x.md", SETTINGS)
+        accepted, rejected = process(
+            None, ctx, [d], _journal_for(tmp_path, ["3993.T"]), SETTINGS
+        )
 
     assert (accepted, rejected) == (1, 0)          # 却下はしない
     assert insert.call_args.args[1][0]["bucket"] == "回転"   # 保有側で保存
@@ -921,3 +939,71 @@ def test_price_tolerance_scales_with_the_currency_of_the_symbol():
     # 米国株: 下限は1セントの半分。50ドルなら比例分(0.1)のほうが大きい
     assert _price_tolerance(1.0, "AAPL") == 0.005
     assert _price_tolerance(50.0, "AAPL") == 0.1
+
+
+# --- 日誌が書かれたかを確かめる ---------------------------------------------
+# 2026-09-07 に、AIが decision.json は書いたのに journal を書かないまま
+# 「成功」で終わった。判断は残るが、なぜそう判断したかの記録が残らない。
+# 判断そのものは正しいので却下はしないが、書かれていない事実は記録する。
+
+
+def test_journal_check_passes_when_the_journal_mentions_every_symbol(tmp_path):
+    from investment.jobs.apply_decision import check_journal_covers
+
+    j = tmp_path / "j.md"
+    j.write_text("# 判断\n\n156A.T を買う。9344.T も買う。\n", encoding="utf-8")
+
+    assert check_journal_covers(j, [{"symbol": "156A.T"}, {"symbol": "9344.T"}]) is None
+
+
+def test_journal_check_reports_symbols_the_journal_never_mentions(tmp_path):
+    from investment.jobs.apply_decision import check_journal_covers
+
+    j = tmp_path / "j.md"
+    j.write_text("# 判断\n\n156A.T を買う。\n", encoding="utf-8")
+
+    gap = check_journal_covers(j, [{"symbol": "156A.T"}, {"symbol": "9344.T"}])
+    assert gap is not None
+    assert gap[0] == "journal:incomplete"
+    assert "9344.T" in gap[1]
+    assert "156A.T" not in gap[1]   # 書かれている銘柄は挙げない
+
+
+def test_journal_check_reports_a_missing_file(tmp_path):
+    from investment.jobs.apply_decision import check_journal_covers
+
+    gap = check_journal_covers(tmp_path / "ない.md", [{"symbol": "156A.T"}])
+    assert gap is not None
+    assert gap[0] == "journal:missing"
+
+
+def test_journal_check_is_skipped_when_nothing_was_accepted(tmp_path):
+    """採用が0件なら、日誌に載る銘柄も無い。"""
+    from investment.jobs.apply_decision import check_journal_covers
+
+    assert check_journal_covers(tmp_path / "ない.md", []) is None
+
+
+def test_process_records_a_gap_when_the_journal_is_missing(tmp_path):
+    """判断は保存するが、日誌が無いことは記録に残すこと。
+
+    2026-09-07 の実行で、AIが decision.json だけ書いて日誌を書かなかった。
+    ステップは成功扱いで、誰も気づかないまま終わった。
+    """
+    from unittest.mock import patch
+
+    ctx = _ctx_with_buckets()
+    ctx["candidates"] = [{"symbol": "1.T", "last_price": 1200.0}]
+
+    with (
+        patch("investment.jobs.apply_decision.insert_proposals"),
+        patch("investment.jobs.apply_decision.record_rejections"),
+        patch("investment.jobs.apply_decision.record_gap") as gap,
+    ):
+        accepted, rejected = process(
+            None, ctx, [_patient(symbol="1.T")], str(tmp_path / "ない.md"), SETTINGS
+        )
+
+    assert (accepted, rejected) == (1, 0)   # 判断そのものは保存する
+    gap.assert_called_once()
+    assert gap.call_args.kwargs["scope"] == "journal:missing"
