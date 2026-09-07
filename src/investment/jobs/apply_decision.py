@@ -10,6 +10,7 @@ from pathlib import Path
 from investment.config import BUCKETS, MAX_POSITIONS, SETTINGS, Settings, bucket_by_name
 from investment.db import connect, record_gap, select_capital
 from investment.market import is_japanese, lot_size
+from investment.notify import send as notify_send
 from investment.sizing import position_size, required_win_rate
 
 REQUIRED_FIELDS = (
@@ -574,7 +575,17 @@ def main() -> int:
             return 1
         capital = select_capital(conn)
         print(f"総資金 {capital:,.0f}円 で検証します")
-        process(conn, ctx, decisions, journal_path, SETTINGS, capital)
+        accepted, _rejected = process(conn, ctx, decisions, journal_path, SETTINGS, capital)
+
+        # 「あなたが動く必要がある」ときだけ通知する。
+        # 提案が0件の日に通知すると、通知そのものが意味を失う。
+        if accepted:
+            notify_send(
+                conn,
+                title=f"買う候補が {accepted} 件あります",
+                body="タップして内容を確認してください",
+                url="/",
+            )
 
     return 0
 

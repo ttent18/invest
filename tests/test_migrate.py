@@ -52,3 +52,31 @@ def test_every_database_workflow_runs_migrations_first(workflow: str):
     assert text.index("investment.jobs.migrate") < first_db_use, (
         f"{workflow} で、マイグレーションがデータベースを使う処理より後になっています"
     )
+
+
+@pytest.mark.parametrize("workflow", ["analyze.yml", "morning.yml"])
+def test_fills_are_applied_before_anything_reads_the_positions(workflow: str):
+    """記録の反映を、保有を読む処理より先に行うこと。
+
+    反映しないまま分析すると、既に買った銘柄をもう一度勧めることになる。
+    朝の確認も、買ったばかりの銘柄を見落とす。
+    """
+    text = (WORKFLOWS / workflow).read_text(encoding="utf-8")
+    assert "investment.jobs.apply_fills" in text, f"{workflow} に反映の手順がありません"
+
+    readers = ("investment.jobs.build_context", "investment.jobs.morning_check")
+    first_reader = min(text.index(m) for m in readers if m in text)
+    assert text.index("investment.jobs.apply_fills") < first_reader, (
+        f"{workflow} で、記録の反映が保有を読む処理より後になっています"
+    )
+
+
+@pytest.mark.parametrize("workflow", ["analyze.yml", "morning.yml"])
+def test_the_notification_keys_reach_the_step_that_sends_them(workflow: str):
+    """通知を送るステップに鍵が渡っていること。
+
+    渡し忘れると、鍵が無いという記録だけが毎回積もる。
+    """
+    text = (WORKFLOWS / workflow).read_text(encoding="utf-8")
+    assert "VAPID_PRIVATE_KEY" in text
+    assert "VAPID_SUBJECT" in text

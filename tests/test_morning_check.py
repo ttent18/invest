@@ -6,6 +6,7 @@ from investment.jobs.morning_check import (
     _lookback_window,
     detect_hits,
     find_expired,
+    main,
     run,
     summarize_result,
 )
@@ -323,3 +324,52 @@ def test_summarize_shows_expired_even_when_something_was_hit():
 def test_summarize_says_nothing_about_deadlines_when_none_expired():
     lines, _ = summarize_result(1, hits=[], failed=0, attempted=1, expired=[])
     assert "期限" not in "\n".join(lines)
+
+
+def test_main_notifies_when_something_may_have_been_executed():
+    """損切り・利確に到達した可能性があるときは通知する。"""
+    hits = [{"symbol": "1111.T", "kind": "stop_loss", "estimated_price": 828,
+             "day_high": 900, "day_low": 820}]
+    with (
+        patch("investment.jobs.morning_check.connect"),
+        patch("investment.jobs.morning_check.select_positions",
+              return_value=[{"symbol": "1111.T", "bucket": "じっくり",
+                             "opened_at": date(2026, 9, 1)}]),
+        patch("investment.jobs.morning_check.run", return_value=(hits, 0, 1)),
+        patch("investment.jobs.morning_check.notify_send") as notify,
+    ):
+        main()
+
+    notify.assert_called_once()
+
+
+def test_main_does_not_notify_on_a_quiet_morning():
+    """何も起きていない朝は通知しない。"""
+    with (
+        patch("investment.jobs.morning_check.connect"),
+        patch("investment.jobs.morning_check.select_positions",
+              return_value=[{"symbol": "1111.T", "bucket": "じっくり",
+                             "opened_at": date(2026, 9, 1)}]),
+        patch("investment.jobs.morning_check.run", return_value=([], 0, 1)),
+        patch("investment.jobs.morning_check.notify_send") as notify,
+    ):
+        main()
+
+    notify.assert_not_called()
+
+
+def test_main_notifies_when_a_position_passed_its_deadline():
+    """回転枠の期限切れは、値動きが無くても知らせる。降りる必要があるため。"""
+    old = date(2026, 8, 24)
+    with (
+        patch("investment.jobs.morning_check.connect"),
+        patch("investment.jobs.morning_check.select_positions",
+              return_value=[{"symbol": "1111.T", "bucket": "回転", "opened_at": old}]),
+        patch("investment.jobs.morning_check.run", return_value=([], 0, 1)),
+        patch("investment.jobs.morning_check.datetime") as dt,
+        patch("investment.jobs.morning_check.notify_send") as notify,
+    ):
+        dt.now.return_value.date.return_value = date(2026, 9, 7)
+        main()
+
+    notify.assert_called_once()

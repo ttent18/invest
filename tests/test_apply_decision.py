@@ -1,10 +1,12 @@
+import json
 import os
+from unittest.mock import patch
 
 import pytest
 
 from investment.config import SETTINGS
 from investment.db import apply_migrations, connect
-from investment.jobs.apply_decision import enrich, insert_proposals, process, validate
+from investment.jobs.apply_decision import enrich, insert_proposals, main, process, validate
 
 CTX = {
     "can_open_new": True,
@@ -1071,3 +1073,54 @@ def test_journal_check_passes_when_the_journal_was_written_this_run(tmp_path):
     os.utime(journal, (2000, 2000))   # 日誌のほうが新しい
 
     assert check_journal_covers(journal, [{"symbol": "156A.T"}], written_after=before) is None
+
+
+def _write_build_files(tmp_path, decisions: list[dict]) -> None:
+    """main() が読む build/context.json と build/decision.json を用意する。
+
+    brief の元テストは json.loads / Path.read_text をモジュール単位で
+    差し替えていたが、それだと無関係な処理まで巻き込んで壊れやすい
+    （標準ライブラリの関数を丸ごと差し替えるため）。ここでは実際に
+    一時ディレクトリへファイルを書き、main() に本物のファイルを読ませる。
+    検証する振る舞い（提案があれば通知する／0件なら通知しない）は変えない。
+    """
+    build_dir = tmp_path / "build"
+    build_dir.mkdir()
+    (build_dir / "context.json").write_text("{}", encoding="utf-8")
+    (build_dir / "decision.json").write_text(
+        json.dumps({"decisions": decisions, "journal_path": "journal/x.md"}),
+        encoding="utf-8",
+    )
+
+
+def test_main_notifies_when_there_are_proposals(tmp_path, monkeypatch):
+    """買うべき提案が出たときは通知する。"""
+    monkeypatch.chdir(tmp_path)
+    _write_build_files(tmp_path, [{"symbol": "1111.T"}])
+
+    with (
+        patch("investment.jobs.apply_decision.connect"),
+        patch("investment.jobs.apply_decision.select_capital", return_value=550_000.0),
+        patch("investment.jobs.apply_decision.process", return_value=(1, 0)),
+        patch("investment.jobs.apply_decision.notify_send") as notify,
+    ):
+        main()
+
+    notify.assert_called_once()
+    assert "1" in notify.call_args.kwargs["title"]
+
+
+def test_main_does_not_notify_when_there_are_no_proposals(tmp_path, monkeypatch):
+    """提案が0件のときは通知しない。動く必要がないため。"""
+    monkeypatch.chdir(tmp_path)
+    _write_build_files(tmp_path, [])
+
+    with (
+        patch("investment.jobs.apply_decision.connect"),
+        patch("investment.jobs.apply_decision.select_capital", return_value=550_000.0),
+        patch("investment.jobs.apply_decision.process", return_value=(0, 0)),
+        patch("investment.jobs.apply_decision.notify_send") as notify,
+    ):
+        main()
+
+    notify.assert_not_called()
