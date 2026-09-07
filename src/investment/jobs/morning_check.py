@@ -277,7 +277,12 @@ def main() -> int:
                 conn,
                 title="SBIで持ち株を確認してください",
                 body=" ／ ".join(parts),
-                url="/holdings",
+                # 画面のファイル名そのもの。Cloudflare Pages は拡張子なしでも
+                # 開けるが、実在するファイル名を指しておくほうが、
+                # ホスティングの設定が変わっても壊れない。
+                # 通知をタップして開けないと、損切りの知らせが届いても
+                # 何も見られないことになる。
+                url="/holdings.html",
             )
     return code
 
