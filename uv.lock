@@ -605,7 +605,6 @@ dependencies = [
     { name = "psycopg", extra = ["binary"] },
     { name = "python-dotenv" },
     { name = "pywebpush" },
-    { name = "requests" },
     { name = "yfinance" },
 ]
 
@@ -622,7 +621,6 @@ requires-dist = [
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
     { name = "python-dotenv", specifier = ">=1.0" },
     { name = "pywebpush", specifier = ">=2.0" },
-    { name = "requests", specifier = ">=2.21.0" },
     { name = "yfinance", specifier = ">=0.2.50" },
 ]
 

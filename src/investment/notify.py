@@ -12,7 +12,6 @@ import json
 import os
 
 from pywebpush import WebPushException, webpush
-from requests.exceptions import RequestException
 
 from investment.db import delete_push_subscription, record_gap, select_push_subscriptions
 
@@ -70,14 +69,15 @@ def send(conn, title: str, body: str, url: str = "/") -> tuple[int, int]:
                 scope="notify:failed",
                 detail=f"通知を送れませんでした（宛先 {sub['endpoint']}）: {exc}",
             )
-        except (RequestException, ValueError) as exc:
-            # WebPushException だけでは足りない。pywebpush は他にも:
-            # - 通信そのものの失敗（名前解決・接続断・タイムアウト）は
-            #   requests.exceptions.RequestException のサブクラスで投げる
-            # - 鍵の形式が壊れている場合は Vapid.from_string が ValueError を投げる
-            # これらを捕まえずにいると main() まで素通りし、既にコミット済みの
-            # 提案保存や朝の確認の判定そのものを巻き添えにしてしまう
-            # （このファイル冒頭の約束を破る）。
+        except Exception as exc:  # noqa: BLE001 - 理由は下のコメントを参照
+            # WebPushException（宛先が失効している場合）以外は、型を絞らずに
+            # 全て受け止める。pywebpush は内部で requests（通信そのものの
+            # 失敗）や、鍵の形式が壊れているときの ValueError など、こちらが
+            # 網羅しきれない種類の例外を投げてくる。ここは通知という補助機能
+            # であり、投げ直して main() まで落としてしまうと、既に保存済みの
+            # 提案や朝の確認の判定まで巻き添えにしてしまう（このファイル冒頭
+            # の約束を破る）。狭く捕まえる利点（想定外の型に気づけること）は
+            # 代わりに record_gap で必ず記録することで確保する。
             failed += 1
             record_gap(
                 conn,
