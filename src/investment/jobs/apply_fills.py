@@ -85,12 +85,13 @@ def run(conn, today: date) -> tuple[int, int]:
             else:
                 result = apply_sell(existing, fill, opened_at, today)
 
-            # 買いは、同じトランザクションの中で提案（proposals）も
-            # 「実行した」（outcome = 'taken'）にする。反映だけ終わって
-            # 提案が pending のまま残ると、スマホの画面に「まだ買って
-            # いない提案」として同じ銘柄がまた出てしまい、二重に買う
-            # 事故につながる。売りは提案を経由しないことがあるので渡さない。
-            proposal_id = row["proposal_id"] if fill["side"] == "buy" else None
+            # 申告に提案が紐づいていれば、同じトランザクションの中で
+            # その提案も「実行した」（outcome = 'taken'）にする。買い・
+            # 売りのどちらでも、反映だけ終わって提案が pending のまま
+            # 残ると、スマホの画面に「まだ実行していない提案」として
+            # 同じ銘柄がまた出てしまい、二重に売買する事故につながる。
+            # 提案に紐づいていない申告（row["proposal_id"] が None）は
+            # save_fill_result 側で何もしないので、ここで場合分けしない。
             save_fill_result(
                 conn,
                 row["id"],
@@ -98,7 +99,7 @@ def run(conn, today: date) -> tuple[int, int]:
                 result.cash_delta,
                 result.trade,
                 fill["currency"],
-                proposal_id=proposal_id,
+                proposal_id=row["proposal_id"],
             )
         except FillError as exc:
             # save_fill_result が現金の反映などに失敗して例外を出した場合、

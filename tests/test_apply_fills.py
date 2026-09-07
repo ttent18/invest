@@ -31,7 +31,7 @@ def conn():
         yield c
 
 
-def _proposal(conn, symbol: str, bucket: str) -> int:
+def _proposal(conn, symbol: str, bucket: str, action: str = "buy") -> int:
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -39,11 +39,11 @@ def _proposal(conn, symbol: str, bucket: str) -> int:
                 (created_at, symbol, action, quantity, entry_price, take_profit,
                  stop_loss, required_win_rate, rationale, scenario, confidence,
                  strategy_tag, bucket, rule_version, journal_path)
-            VALUES (NOW(), %s, 'buy', 100, 900, 1098, 828, 0.2667,
+            VALUES (NOW(), %s, %s, 100, 900, 1098, 828, 0.2667,
                     'x', 'y', 'mid', 'z', %s, 'v3', 'journal/x.md')
             RETURNING id
             """,
-            (symbol, bucket),
+            (symbol, action, bucket),
         )
         pid = cur.fetchone()["id"]
     conn.commit()
@@ -106,6 +106,31 @@ def test_applying_a_buy_marks_the_proposal_as_taken(conn):
 
     with conn.cursor() as cur:
         cur.execute("SELECT outcome FROM proposals WHERE id = %s", (pid,))
+        assert cur.fetchone()["outcome"] == "taken"
+
+
+def test_applying_a_sell_marks_the_proposal_as_taken(conn):
+    """提案どおりに売ったら、その提案も「実行した」にすること。
+
+    以前の実装は `proposal_id = row["proposal_id"] if fill["side"] == "buy"
+    else None` としており、売りのときは提案の紐付けをジョブ側で
+    捨てていた。すると売った後も提案が pending のまま画面に残り、
+    「まだ実行していない提案」として出続ける（一部売却なら、
+    利用者がそれを見てもう一度売る操作をし、二重に売ってしまう
+    事故にもつながる）。
+    """
+    pid_buy = _proposal(conn, "1111.T", "じっくり")
+    _fill(conn, proposal_id=pid_buy, symbol="1111.T", side="buy", quantity=100, price=900)
+    run(conn, today=date(2026, 9, 8))
+
+    pid_sell = _proposal(conn, "1111.T", "じっくり", action="sell")
+    _fill(
+        conn, proposal_id=pid_sell, symbol="1111.T", side="sell", quantity=100, price=1100
+    )
+    run(conn, today=date(2026, 9, 30))
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT outcome FROM proposals WHERE id = %s", (pid_sell,))
         assert cur.fetchone()["outcome"] == "taken"
 
 
@@ -201,6 +226,43 @@ def test_applying_a_sell_removes_the_position_and_adds_the_cash(conn):
     assert sell["bucket"] == "じっくり"
 
 
+def test_buying_more_of_the_same_position_does_not_change_when_it_was_first_opened(conn):
+    """買い増しても「最初に持った日」（opened_at）が動かないこと。
+
+    opened_at は回転枠の期限（10営業日）の起点。買い増すたびに動くと、
+    期限という仕組みが骨抜きになる。`save_fill_result` の
+    `ON CONFLICT ... DO UPDATE` は opened_at を更新対象に入れていないが、
+    それを確かめるテストがこれまで無かった（将来
+    `opened_at = EXCLUDED.opened_at` を足しても、他のテストは
+    通ったままになってしまう）。
+    """
+    pid = _proposal(conn, "1111.T", "じっくり")
+    _fill(conn, proposal_id=pid, symbol="1111.T", side="buy", quantity=100, price=900)
+    run(conn, today=date(2026, 9, 8))
+
+    # 「最初に持った日」を、はっきり見分けられる値に固定してから買い増す。
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE positions SET opened_at = '2020-01-01T00:00:00+00' "
+            "WHERE symbol = '1111.T' RETURNING opened_at"
+        )
+        first_opened_at = cur.fetchone()["opened_at"]
+    conn.commit()
+
+    pid2 = _proposal(conn, "1111.T", "じっくり")
+    _fill(conn, proposal_id=pid2, symbol="1111.T", side="buy", quantity=50, price=950)
+    assert run(conn, today=date(2026, 9, 9)) == (1, 0)
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT opened_at, quantity FROM positions WHERE symbol = '1111.T'"
+        )
+        row = cur.fetchone()
+
+    assert row["opened_at"] == first_opened_at   # 買い増しても動いていないこと
+    assert row["quantity"] == 150
+
+
 def test_a_fill_that_cannot_be_applied_is_kept_with_its_reason(conn):
     """反映できない申告を黙って消さないこと。"""
     fid = _fill(conn, symbol="9999.T", side="sell", quantity=100, price=900)
@@ -251,31 +313,46 @@ def test_applying_the_same_fill_twice_does_not_double_count(conn):
 def test_a_missing_cash_row_leaves_the_fill_unapplied_with_a_reason(conn):
     """現金の行が無い通貨は、黙って現金だけ動かないまま成功にしないこと。
 
-    取引の追加や保有の作成だけ進んで現金が動かない状態は、
-    帳尻が合わなくなる一番避けたい壊れ方。反映は取り消し、
-    fills には理由を残す。
+    **売りで確かめる。** 買いだと `run()` が先に `select_cash(conn).get(...)`
+    で現金を読み（行が無ければ 0.0）、`apply_buy` の「現金が足りません」
+    チェックにそこで弾かれてしまい、`db.save_fill_result` の中にある
+    `cur.rowcount == 0` の守り（現金の行が無いこと自体を検出する処理）
+    には一度も到達しない。それでは守りを丸ごと消してもテストが
+    緑のまま通ってしまい、確認になっていない。売りは現金を先読み
+    しないので、必ずこの守りに到達する（レビューで確認済み）。
+
+    取引の追加や保有の更新だけ進んで現金が動かない状態は、帳尻が
+    合わなくなる一番避けたい壊れ方。反映は取り消し、fills には
+    理由を残す。
     """
+    pid = _proposal(conn, "1111.T", "じっくり")
+    _fill(conn, proposal_id=pid, symbol="1111.T", side="buy", quantity=100, price=900)
+    run(conn, today=date(2026, 9, 8))
+    before = _state(conn)
+
     with conn.cursor() as cur:
         cur.execute("DELETE FROM cash WHERE currency = 'JPY'")
     conn.commit()
 
-    pid = _proposal(conn, "1111.T", "じっくり")
-    fid = _fill(conn, proposal_id=pid, symbol="1111.T", side="buy", quantity=100, price=900)
+    pid_sell = _proposal(conn, "1111.T", "じっくり", action="sell")
+    fid = _fill(
+        conn, proposal_id=pid_sell, symbol="1111.T", side="sell", quantity=100, price=1100
+    )
 
-    assert run(conn, today=date(2026, 9, 8)) == (0, 1)
+    assert run(conn, today=date(2026, 9, 30)) == (0, 1)
 
     with conn.cursor() as cur:
         cur.execute("SELECT applied_at, apply_error FROM fills WHERE id = %s", (fid,))
         row = cur.fetchone()
     assert row["applied_at"] is None
-    assert row["apply_error"]
+    assert "現金" in row["apply_error"]
 
     s = _state(conn)
-    assert s["positions"] == []   # 保有も作られていないこと（全部取り消し）
-    assert s["trades"] == []      # 取引も残っていないこと（全部取り消し）
+    assert s["positions"] == before["positions"]   # 保有が減っていないこと（全部取り消し）
+    assert len(s["trades"]) == len(before["trades"])   # 売りの取引が増えていないこと
 
     with conn.cursor() as cur:
-        cur.execute("SELECT outcome FROM proposals WHERE id = %s", (pid,))
+        cur.execute("SELECT outcome FROM proposals WHERE id = %s", (pid_sell,))
         # 提案も pending のまま残ること。反映は同じトランザクションで
         # 提案を taken にするところまで含むので、現金が原因で全体が
         # 取り消されるなら提案も一緒に取り消される。ここで taken に
