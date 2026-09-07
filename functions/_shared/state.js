@@ -38,11 +38,20 @@ function jstDayNumber(date) {
 }
 
 // jstDayNumber が返す「日本時間の日番号」から、その日の曜日
-// (0=日, 6=土) を出す。day * MS_PER_DAY - JST_OFFSET_MS は、その
-// 日本時間の午前0時ちょうどのUTCミリ秒になる。その瞬間の getUTCDay()
-// は、日本時間のカレンダー上のその日の曜日と一致する。
+// (0=日, 6=土) を出す。
+//
+// 日番号は「1970年1月1日から数えて何日目か（日本時間で）」という
+// 整数なので、同じ日番号を UTC の午前0時として読み直した
+// new Date(dayNumber * MS_PER_DAY) は、日本時間のカレンダー上の
+// その日と同じ日付になる。だから getUTCDay() がそのまま曜日になる。
+//
+// **JST_OFFSET_MS を引いてはいけない。** 引くと「日本時間の午前0時
+// ちょうどの瞬間」（＝UTCでは前日の15:00）になり、getUTCDay() は
+// 前日の曜日を返してしまう。それをやると土曜を営業日として数え、
+// 月曜を休みとして数えることになり、下の businessDaysBetween が
+// morning_check.py と1日ずれる（2026-09-08 に判明）。
 function jstWeekday(dayNumber) {
-  return new Date(dayNumber * MS_PER_DAY - JST_OFFSET_MS).getUTCDay();
+  return new Date(dayNumber * MS_PER_DAY).getUTCDay();
 }
 
 // start から end（ともに jstDayNumber）までの営業日数を数える
@@ -61,7 +70,18 @@ function businessDaysBetween(startDayNumber, endDayNumber) {
   return days;
 }
 
-function buildPositions(positionRows, now) {
+// 銘柄コード（7203.T のような記号）から会社名を引く。
+//
+// 会社名は「あると助かる」補助の情報であって、無くても保有や提案そのものは
+// 成り立つ。だから引けなかったときは null を返すだけにして、画面全体を
+// 落とさない（この仕組みでは「補助の失敗が本体を巻き添えにする」という
+// 壊れ方が繰り返し出ている）。
+function lookupName(namesBySymbol, symbol) {
+  if (!namesBySymbol) return null;
+  return namesBySymbol.get(symbol) ?? null;
+}
+
+function buildPositions(positionRows, now, namesBySymbol) {
   const todayDay = jstDayNumber(now);
   // 1件ずつ独立に組み立てる。ある1件の last_price が無くても、
   // その行の含み損益が null になるだけで、他の行の処理には影響しない。
@@ -89,6 +109,9 @@ function buildPositions(positionRows, now) {
 
     return {
       symbol: p.symbol,
+      // 会社名。SBIの画面に銘柄コードを手で打ち込むときの照合用。
+      // 引けなければ null（この1件のせいで他の保有まで消さない）。
+      name: lookupName(namesBySymbol, p.symbol),
       bucket: p.bucket,
       quantity,
       avg_price: avgPrice,
@@ -141,8 +164,18 @@ function buildBuckets(positionRows) {
   });
 }
 
-function buildProposals(proposalRows, now) {
+function buildProposals(proposalRows, positionRows, now, namesBySymbol) {
   const nowDay = jstDayNumber(now);
+  // いま持っている銘柄コードの一覧。提案に「これは持っている銘柄です」と
+  // 印を付けるために使う。
+  //
+  // なぜ要るか: 提案の候補を作るときに外しているのは「保有中の銘柄」だけで、
+  // 「まだ返事をしていない提案がある銘柄」は外していない。しかも返事の無い
+  // 提案は自動では消えない。そのため「月曜に出た提案を放置 → 火曜にまた
+  // 同じ銘柄が提案される」が起こりうる。片方に「買った」と記録したあと、
+  // 翌朝の反映で保有になってから残ったもう1件を押すと、持っている銘柄を
+  // さらに買い増すことになる（この仕組みが禁じている操作）。
+  const heldSymbols = new Set(positionRows.map((p) => p.symbol));
   return proposalRows.map((p) => {
     const quantity = num(p.quantity);
     const entryPrice = num(p.entry_price);
@@ -150,6 +183,11 @@ function buildProposals(proposalRows, now) {
     return {
       id: num(p.id),
       symbol: p.symbol,
+      // 会社名。引けなければ null（提案そのものは会社名が無くても成り立つ）。
+      name: lookupName(namesBySymbol, p.symbol),
+      // この銘柄をいま持っているか。買いの提案でこれが true なら、
+      // 押すと買い増しになるので押してはいけない。
+      already_held: heldSymbols.has(p.symbol),
       // 'buy'（買い）か 'sell'（売り）。画面はこれを見て「買った」ではなく
       // 「売った」のカードを出す必要がある。落とすと、売るべき提案が
       // 買いの提案として表示され、利用者が逆の注文を出しかねない。
@@ -194,6 +232,19 @@ function buildPerformance(performanceRows) {
       win_rate: closed ? wins / closed : null,
       total_pnl: row ? num(row.total_pnl) : 0,
       avg_holding_days: row && row.avg_holding_days !== null ? num(row.avg_holding_days) : null,
+      // 期限で降りた件数。rules/v3.md が「各枠15件たまったら勝率・平均保有
+      // 日数・期限切れの件数で比べる」と決めているため、3つ目のこれが要る。
+      //
+      // **これは「なぜ売ったか」の記録ではなく、保有日数からの導出である。**
+      // 期限のある枠（回転枠）で、保有日数が期限（10営業日）以上だった
+      // 決着済みの取引を数えているだけ。そのため、利確や損切りで降りた日が
+      // たまたま10営業日目だった取引もここに数えてしまう。
+      // **件数は実際より多め（過大側）に出る。**
+      //
+      // 期限の無いじっくり枠は 0 ではなく null にする。0 は「期限切れが
+      // 一度も無かった」という事実だが、じっくり枠にはそもそも期限が無い
+      // （数えようがない）ので、それを 0 と書くと嘘になる。
+      expired_count: b.max_holding_days === null ? null : row ? num(row.expired_count) : 0,
       breakeven_win_rate: breakevenWinRate(b),
     };
   });
@@ -202,6 +253,11 @@ function buildPerformance(performanceRows) {
 function buildFills(fillRows) {
   return fillRows.map((f) => ({
     id: num(f.id),
+    // どの提案に対する記録か。画面はこれを見て「この提案はもう記録済み」を
+    // 判定する。銘柄コードと売買の向きだけで判定すると、同じ銘柄・同じ向きの
+    // 提案が2件並んだときに、片方を記録しただけで両方が記録済みに見えてしまう。
+    // 売りの記録は提案を経由しないことがあるので null がありうる。
+    proposal_id: f.proposal_id === null || f.proposal_id === undefined ? null : num(f.proposal_id),
     symbol: f.symbol,
     side: f.side,
     quantity: num(f.quantity),
@@ -213,13 +269,20 @@ function buildFills(fillRows) {
 
 // now: Date。generated_at と proposals[].days_old に使う。
 // vapidPublicKey: Cloudflare の環境変数 VAPID_PUBLIC_KEY（無ければ null）。
+// isVirtual: 仮想資金での練習中なら true、実際のお金を動かしているなら false。
+//   どちらかの判断は functions/api/state.js が環境変数から行う。ここでは
+//   受け取った値をそのまま返すだけ（渡されなければ安全側の true）。
 // capital: db.select_capital 相当（現金 JPY + 保有の取得原価）を呼び出し側で計算した値。
+// namesBySymbol: 銘柄コード → 会社名 の Map（引けなかった銘柄は入っていない）。
+//   渡されなくても動く。会社名は補助の情報なので、無いときは null を返すだけ。
 // cashRows / positionRows / proposalRows / performanceRows / fillRows は
 // それぞれの表を読んだSQLの結果（行の配列）をそのまま渡す。
 export function buildState({
   now,
   vapidPublicKey,
+  isVirtual,
   capital,
+  namesBySymbol,
   cashRows,
   positionRows,
   proposalRows,
@@ -229,7 +292,14 @@ export function buildState({
   const capitalNum = num(capital);
   return {
     generated_at: now.toISOString(),
-    is_virtual: true, // いまは仮想資金での検証段階のため、常に true
+    // 仮想資金での練習中かどうか。画面はこれを見て「実際のお金はまだ
+    // 動いていません」と出す。以前はここに true と直接書いてあり、実際の
+    // お金に切り替えたあとも画面が「動いていません」と言い続けた。
+    //
+    // 渡されなかったときは true（練習中）にする。設定を入れるのは実際の
+    // お金に切り替えるときなので、「まだ設定されていない」＝「まだ切り替えて
+    // いない」であり、練習中とみなすのが実態に合う。
+    is_virtual: isVirtual === undefined ? true : isVirtual,
     vapid_public_key: vapidPublicKey ?? null,
     capital: capitalNum,
     // 最初に入金した額（円）。src/investment/config.py の
@@ -245,8 +315,8 @@ export function buildState({
       max_positions: MAX_POSITIONS,
     },
     buckets: buildBuckets(positionRows),
-    proposals: buildProposals(proposalRows, now),
-    positions: buildPositions(positionRows, now),
+    proposals: buildProposals(proposalRows, positionRows, now, namesBySymbol),
+    positions: buildPositions(positionRows, now, namesBySymbol),
     performance: buildPerformance(performanceRows),
     unapplied_fills: buildFills(fillRows),
   };
