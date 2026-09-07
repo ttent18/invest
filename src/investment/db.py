@@ -136,6 +136,35 @@ def select_cash(conn) -> dict[str, float]:
         return {r["currency"]: float(r["amount"]) for r in cur.fetchall()}
 
 
+def select_capital(conn) -> float:
+    """いまの総資金を返す。現金の残高 ＋ 保有の取得原価。
+
+    現在の株価は使わない。理由は2つ。
+
+    1. 現在値を使うと、含み益が出ているだけで次に買う金額が膨らみ、
+       リスクが勝手に増えてしまう
+    2. 現在値の取得は通信が必要で失敗しうる。総資金の計算が
+       通信の失敗で止まるのは筋が悪い
+
+    利確して現金が増えれば総資金も増えるので、
+    「利確して資金を増やし、さらに投資する」という循環は成立する。
+
+    いまは円だけを数える。ドルを円に足すと桁が狂うため。
+    米国株を有効にするときに、為替を掛けて足す形へ直すこと。
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT COALESCE(SUM(amount), 0) AS c FROM cash WHERE currency = 'JPY'")
+        cash = float(cur.fetchone()["c"])
+        cur.execute(
+            """
+            SELECT COALESCE(SUM(quantity * avg_price), 0) AS c
+            FROM positions WHERE currency = 'JPY'
+            """
+        )
+        held = float(cur.fetchone()["c"])
+    return cash + held
+
+
 def init_cash(conn, jpy: float) -> int:
     """現金残高を初期化する。何度実行しても安全（冪等）。
 

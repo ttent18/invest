@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 from investment.config import BUCKETS, MAX_POSITIONS, SETTINGS, Settings, bucket_by_name
-from investment.db import connect, record_gap
+from investment.db import connect, record_gap, select_capital
 from investment.market import is_japanese, lot_size
 from investment.sizing import position_size, required_win_rate
 
@@ -107,7 +107,11 @@ def _to_positive_int_quantity(decision: dict) -> tuple[int | None, str | None]:
 
 
 def validate(
-    decision: dict, ctx: dict, settings: Settings, taken: dict[str, int] | None = None
+    decision: dict,
+    ctx: dict,
+    settings: Settings,
+    capital: float,
+    taken: dict[str, int] | None = None,
 ) -> list[str]:
     """判断が制約を満たすか調べる。問題があればメッセージを返す。
 
@@ -238,7 +242,7 @@ def validate(
             # 株数を出しがちだが、その答えは実際には発注できないことがある。
             unit = lot_size(decision["symbol"])
             allowed = position_size(
-                settings.total_capital,
+                capital,
                 settings.risk_per_trade_pct,
                 settings.max_position_pct,
                 entry,
@@ -254,8 +258,8 @@ def validate(
                 # 買えない理由は2つある。どちらなのかを見て言い分けること。
                 # まとめて「金額の上限を超える」と言うと、金額は上限内なのに
                 # 「上限を超える」と告げる、それ自体で矛盾したメッセージになる。
-                cap_amount = settings.total_capital * settings.max_position_pct
-                risk_amount = settings.total_capital * settings.risk_per_trade_pct
+                cap_amount = capital * settings.max_position_pct
+                risk_amount = capital * settings.risk_per_trade_pct
                 if entry * unit > cap_amount:
                     errors.append(
                         f"{decision['symbol']} は{unit}株で {entry * unit:,.0f}円 になり、"
@@ -418,7 +422,12 @@ def record_no_proposals(conn, ctx: dict, decisions: list[dict]) -> None:
 
 
 def process(
-    conn, ctx: dict, decisions: list[dict], journal_path: str, settings: Settings
+    conn,
+    ctx: dict,
+    decisions: list[dict],
+    journal_path: str,
+    settings: Settings,
+    capital: float,
 ) -> tuple[int, int]:
     """decisions を検証し、結果に応じて proposals / data_gaps に記録する。
 
@@ -434,7 +443,7 @@ def process(
     mismatches: list[tuple[str, list[str]]] = []
     for d in decisions:
         stated_bucket = d.get("bucket") if d.get("action") == "sell" else None
-        errors = validate(d, ctx, settings, taken)
+        errors = validate(d, ctx, settings, capital, taken)
         if errors:
             rejected.append((d.get("symbol", "?"), errors))
             continue
@@ -563,7 +572,9 @@ def main() -> int:
             record_gap(conn, scope=missing[0], detail=missing[1])
             print(missing[1])
             return 1
-        process(conn, ctx, decisions, journal_path, SETTINGS)
+        capital = select_capital(conn)
+        print(f"総資金 {capital:,.0f}円 で検証します")
+        process(conn, ctx, decisions, journal_path, SETTINGS, capital)
 
     return 0
 

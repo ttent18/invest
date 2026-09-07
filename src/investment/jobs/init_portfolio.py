@@ -1,8 +1,10 @@
 """仮想ポートフォリオの現金残高を初期化する。
 
-SETTINGS.total_capital を JPY の初期残高として cash テーブルに入れる。
-USD は 0 で初期化する。何度実行しても安全（冪等）。金額の出所は
-investment.config.SETTINGS.total_capital のみとし、ここでは直書きしない。
+SETTINGS.initial_capital（最初に入金する額）を JPY の初期残高として
+cash テーブルに入れる。USD は 0 で初期化する。何度実行しても安全（冪等）。
+金額の出所は investment.config.SETTINGS.initial_capital のみとし、
+ここでは直書きしない。運用が始まったあとの総資金は db.select_capital()
+が現金と保有から計算するので、ここでは扱わない。
 """
 
 import sys
@@ -13,7 +15,7 @@ from investment.db import connect, init_cash, select_cash
 
 def main() -> int:
     with connect() as conn:
-        inserted = init_cash(conn, jpy=SETTINGS.total_capital)
+        inserted = init_cash(conn, jpy=SETTINGS.initial_capital)
         cash = select_cash(conn)
 
     if inserted:

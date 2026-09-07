@@ -26,7 +26,7 @@ def test_assemble_includes_candidates_and_constraints():
             "last_price": 3120.0,
         }
     ]
-    ctx = assemble(candidates, [], {"JPY": 550_000}, SETTINGS, SCREEN, dropped=[])
+    ctx = assemble(candidates, [], {"JPY": 550_000}, SETTINGS, SCREEN, dropped=[], capital=550_000.0)
 
     assert ctx["is_virtual"] is True
     assert ctx["rule_version"] == "v3"
@@ -40,7 +40,7 @@ def test_assemble_includes_candidates_and_constraints():
 
 def test_assemble_reports_no_room_when_positions_are_full():
     full = [{"symbol": f"{i}.T"} for i in range(4)]  # 合計4枠が境界
-    ctx = assemble([], full, {"JPY": 0}, SETTINGS, SCREEN, dropped=[])
+    ctx = assemble([], full, {"JPY": 0}, SETTINGS, SCREEN, dropped=[], capital=550_000.0)
     assert ctx["can_open_new"] is False
 
 
@@ -50,12 +50,14 @@ def test_read_inputs_reads_everything_the_database_holds():
         patch("investment.jobs.build_context.select_screened", return_value=[{"symbol": "1111.T"}]),
         patch("investment.jobs.build_context.select_positions", return_value=[{"symbol": "9.T"}]),
         patch("investment.jobs.build_context.select_cash", return_value={"JPY": 550_000}),
+        patch("investment.jobs.build_context.select_capital", return_value=550_000.0),
     ):
-        candidates, positions, cash = read_inputs(conn=None, criteria=SCREEN, limit=50)
+        candidates, positions, cash, capital = read_inputs(conn=None, criteria=SCREEN, limit=50)
 
     assert candidates == [{"symbol": "1111.T"}]
     assert positions == [{"symbol": "9.T"}]
     assert cash == {"JPY": 550_000}
+    assert capital == 550_000.0
 
 
 def test_attach_last_price_never_touches_the_database():
@@ -133,6 +135,7 @@ def test_main_closes_the_connection_before_fetching_prices(tmp_path):
         patch("investment.jobs.build_context.select_screened", return_value=[{"symbol": "1111.T"}]),
         patch("investment.jobs.build_context.select_positions", return_value=[]),
         patch("investment.jobs.build_context.select_cash", return_value={"JPY": 550_000}),
+        patch("investment.jobs.build_context.select_capital", return_value=550_000.0),
         patch("investment.jobs.build_context.fetch_last_price", side_effect=fake_fetch),
         patch("investment.jobs.build_context.record_gaps") as record,
         patch("investment.jobs.build_context.OUTPUT", tmp_path / "context.json"),
@@ -161,6 +164,7 @@ def test_main_does_not_reopen_the_connection_when_nothing_failed(tmp_path):
         patch("investment.jobs.build_context.select_screened", return_value=[{"symbol": "1111.T"}]),
         patch("investment.jobs.build_context.select_positions", return_value=[]),
         patch("investment.jobs.build_context.select_cash", return_value={"JPY": 550_000}),
+        patch("investment.jobs.build_context.select_capital", return_value=550_000.0),
         # 100株で120,000円。上限137,500円に収まるので除外されない
         patch("investment.jobs.build_context.fetch_last_price", return_value=1200.0),
         patch("investment.jobs.build_context.record_gaps") as record,
@@ -187,7 +191,7 @@ def test_drop_unaffordable_removes_stocks_whose_one_lot_exceeds_the_limit():
         {"symbol": "2222.T", "last_price": 2704.0},   # 100株 = 270,400円 → 買えない
         {"symbol": "3333.T", "last_price": 1375.0},   # 100株 = 137,500円 ちょうど → 買える
     ]
-    kept, dropped = drop_unaffordable(candidates, SETTINGS)
+    kept, dropped = drop_unaffordable(candidates, SETTINGS, capital=550_000.0)
 
     assert [c["symbol"] for c in kept] == ["1111.T", "3333.T"]
     assert [d["symbol"] for d in dropped] == ["2222.T"]
@@ -195,7 +199,7 @@ def test_drop_unaffordable_removes_stocks_whose_one_lot_exceeds_the_limit():
 
 def test_drop_unaffordable_keeps_us_stocks_that_fit_in_one_share():
     """米国株は1株から買えるので、株価が上限内なら残る。"""
-    kept, dropped = drop_unaffordable([{"symbol": "AAPL", "last_price": 200.0}], SETTINGS)
+    kept, dropped = drop_unaffordable([{"symbol": "AAPL", "last_price": 200.0}], SETTINGS, capital=550_000.0)
     assert [c["symbol"] for c in kept] == ["AAPL"]
     assert dropped == []
 
@@ -208,7 +212,7 @@ def test_assemble_records_what_it_dropped_and_why():
     dropped = [
         {"symbol": "2222.T", "last_price": 2704.0, "lot_size": 100, "lot_cost": 270400.0}
     ]
-    ctx = assemble([], [], {"JPY": 550_000}, SETTINGS, SCREEN, dropped=dropped)
+    ctx = assemble([], [], {"JPY": 550_000}, SETTINGS, SCREEN, dropped=dropped, capital=550_000.0)
 
     assert ctx["excluded_candidates"]["count"] == 1
     assert "2222.T" in str(ctx["excluded_candidates"]["symbols"])
@@ -222,9 +226,49 @@ def test_kept_candidates_carry_the_lot_size_and_the_buyable_quantity():
     正しい答えをこちらで計算して渡す。
     株価1,200円・上限137,500円なら114株買えるが、100株単位なので100株。
     """
-    kept, _ = drop_unaffordable([{"symbol": "1111.T", "last_price": 1200.0}], SETTINGS)
+    kept, _ = drop_unaffordable([{"symbol": "1111.T", "last_price": 1200.0}], SETTINGS, capital=550_000.0)
     assert kept[0]["lot_size"] == 100
     assert kept[0]["max_quantity"] == 100
+
+
+def test_read_inputs_returns_the_capital_calculated_from_the_database():
+    """総資金をコードの直書きではなくデータベースから取ること。"""
+    with (
+        patch("investment.jobs.build_context.select_screened", return_value=[]),
+        patch("investment.jobs.build_context.select_positions", return_value=[]),
+        patch("investment.jobs.build_context.select_cash", return_value={"JPY": 620_000}),
+        patch("investment.jobs.build_context.select_capital", return_value=620_000.0),
+    ):
+        _candidates, _positions, _cash, capital = read_inputs(
+            conn=None, criteria=SCREEN, limit=50
+        )
+
+    assert capital == 620_000.0
+
+
+def test_assemble_reports_the_capital_it_was_given_not_the_initial_deposit():
+    """コンテキストに入る総資金は、いまの額であること。"""
+    ctx = assemble([], [], {"JPY": 620_000}, SETTINGS, SCREEN, dropped=[], capital=620_000.0)
+    assert ctx["constraints"]["total_capital"] == 620_000.0
+
+
+def test_the_buying_limit_grows_with_the_capital():
+    """資金が増えたら、1銘柄に投じられる額も増えること。
+
+    これが「利確して資金を増やし、さらに投資する」の中身である。
+    550,000円のときは137,500円まで、620,000円なら155,000円まで買える。
+    """
+    kept, _ = drop_unaffordable(
+        [{"symbol": "1111.T", "last_price": 1500.0}], SETTINGS, capital=620_000.0
+    )
+    assert len(kept) == 1                       # 100株で150,000円。155,000円以内
+    assert kept[0]["max_quantity"] == 100
+
+    kept, dropped = drop_unaffordable(
+        [{"symbol": "1111.T", "last_price": 1500.0}], SETTINGS, capital=550_000.0
+    )
+    assert kept == []                           # 137,500円では買えない
+    assert dropped[0]["symbol"] == "1111.T"
 
 
 def test_the_rule_version_has_a_matching_rules_document():
@@ -248,7 +292,7 @@ def test_kept_candidates_carry_the_highest_usable_entry_price():
 
     そこで「この株数を保ったまま出せる買値の上限」を計算して渡す。
     """
-    kept, _ = drop_unaffordable([{"symbol": "1111.T", "last_price": 1300.0}], SETTINGS)
+    kept, _ = drop_unaffordable([{"symbol": "1111.T", "last_price": 1300.0}], SETTINGS, capital=550_000.0)
 
     assert kept[0]["max_quantity"] == 100
     # 137,500円 ÷ 100株 = 1,375円 まで
@@ -260,7 +304,7 @@ def test_kept_candidates_carry_the_highest_usable_entry_price():
 def test_max_entry_price_is_rounded_down_to_stay_within_the_limit():
     """割り切れない場合は切り捨てる。切り上げると上限を超えてしまう。"""
     # 306円 → max_quantity=400 → 137,500 ÷ 400 = 343.75 → 343円
-    kept, _ = drop_unaffordable([{"symbol": "5137.T", "last_price": 306.0}], SETTINGS)
+    kept, _ = drop_unaffordable([{"symbol": "5137.T", "last_price": 306.0}], SETTINGS, capital=550_000.0)
     assert kept[0]["max_quantity"] == 400
     assert kept[0]["max_entry_price"] == 343.0
     assert kept[0]["max_entry_price"] * kept[0]["max_quantity"] <= 550_000 * 0.25
@@ -288,6 +332,7 @@ def test_main_records_the_excluded_candidates_in_the_database(tmp_path):
         ),
         patch("investment.jobs.build_context.select_positions", return_value=[]),
         patch("investment.jobs.build_context.select_cash", return_value={"JPY": 550_000}),
+        patch("investment.jobs.build_context.select_capital", return_value=550_000.0),
         patch(
             "investment.jobs.build_context.fetch_last_price",
             side_effect=lambda s: 1200.0 if s == "1111.T" else 2704.0,
@@ -313,7 +358,7 @@ def test_assemble_tells_the_ai_each_bucket_and_how_many_slots_are_free():
     AIはどちらの枠で買うかを選ぶ必要があり、選んだ枠によって
     利確幅・損切り幅が変わる。空き枠が無い枠には提案できない。
     """
-    ctx = assemble([], [], {"JPY": 550_000}, SETTINGS, SCREEN, dropped=[])
+    ctx = assemble([], [], {"JPY": 550_000}, SETTINGS, SCREEN, dropped=[], capital=550_000.0)
     by_name = {b["name"]: b for b in ctx["buckets"]}
 
     assert by_name["じっくり"] == {
@@ -333,7 +378,7 @@ def test_assemble_counts_used_slots_per_bucket():
         {"symbol": "2222.T", "bucket": "回転"},
         {"symbol": "3333.T", "bucket": "じっくり"},
     ]
-    ctx = assemble([], positions, {}, SETTINGS, SCREEN, dropped=[])
+    ctx = assemble([], positions, {}, SETTINGS, SCREEN, dropped=[], capital=550_000.0)
     by_name = {b["name"]: b for b in ctx["buckets"]}
 
     assert (by_name["回転"]["used"], by_name["回転"]["free"]) == (2, 0)
@@ -346,7 +391,7 @@ def test_positions_without_a_bucket_are_counted_as_patient_not_ignored():
     数え落とすと「枠が空いている」と誤って伝えることになり、
     上限を超えて買う提案が出てしまう。
     """
-    ctx = assemble([], [{"symbol": "1111.T"}], {}, SETTINGS, SCREEN, dropped=[])
+    ctx = assemble([], [{"symbol": "1111.T"}], {}, SETTINGS, SCREEN, dropped=[], capital=550_000.0)
     by_name = {b["name"]: b for b in ctx["buckets"]}
     assert by_name["じっくり"]["used"] == 1
 
@@ -360,7 +405,7 @@ def test_free_slots_never_exceed_the_overall_remaining_capacity():
     ここは表示を正すだけ。）
     """
     positions = [{"symbol": f"{i}.T", "bucket": "回転"} for i in range(3)]
-    ctx = assemble([], positions, {}, SETTINGS, SCREEN, dropped=[])
+    ctx = assemble([], positions, {}, SETTINGS, SCREEN, dropped=[], capital=550_000.0)
     by_name = {b["name"]: b for b in ctx["buckets"]}
 
     assert by_name["回転"]["free"] == 0
@@ -375,7 +420,7 @@ def test_positions_with_an_unknown_bucket_name_are_still_counted():
     この関数がいちばん避けたい形になる。
     """
     ctx = assemble([], [{"symbol": "1111.T", "bucket": "なんとなく"}],
-                   {}, SETTINGS, SCREEN, dropped=[])
+                   {}, SETTINGS, SCREEN, dropped=[], capital=550_000.0)
     by_name = {b["name"]: b for b in ctx["buckets"]}
     assert by_name["じっくり"]["used"] == 1
     assert sum(b["used"] for b in ctx["buckets"]) == 1

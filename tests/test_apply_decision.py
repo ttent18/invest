@@ -45,46 +45,46 @@ def good(**overrides) -> dict:
 
 
 def test_valid_decision_has_no_errors():
-    assert validate(good(), CTX, SETTINGS) == []
+    assert validate(good(), CTX, SETTINGS, capital=550_000.0) == []
 
 
 def test_rejects_missing_stop_loss():
     d = good()
     del d["stop_loss"]
-    errors = validate(d, CTX, SETTINGS)
+    errors = validate(d, CTX, SETTINGS, capital=550_000.0)
     assert any("stop_loss" in e for e in errors)
 
 
 def test_rejects_symbol_not_in_candidates():
-    errors = validate(good(symbol="7203.T"), CTX, SETTINGS)
+    errors = validate(good(symbol="7203.T"), CTX, SETTINGS, capital=550_000.0)
     assert any("候補に含まれていません" in e for e in errors)
 
 
 def test_rejects_quantity_over_position_limit():
     # 上限25% = 137,500円 → 1200円なら114株買えるが、100株単位なので上限は100株。
     # 200株は上限を超える
-    errors = validate(good(quantity=200), CTX, SETTINGS)
+    errors = validate(good(quantity=200), CTX, SETTINGS, capital=550_000.0)
     assert any("上限" in e for e in errors)
 
 
 def test_rejects_when_no_room_for_new_position():
     ctx = dict(CTX, can_open_new=False)
-    errors = validate(good(), ctx, SETTINGS)
+    errors = validate(good(), ctx, SETTINGS, capital=550_000.0)
     assert any("同時保有" in e for e in errors)
 
 
 def test_rejects_stop_loss_above_entry():
-    errors = validate(good(stop_loss=2500.0), CTX, SETTINGS)
+    errors = validate(good(stop_loss=2500.0), CTX, SETTINGS, capital=550_000.0)
     assert any("stop_loss" in e for e in errors)
 
 
 def test_rejects_unknown_confidence():
-    errors = validate(good(confidence="とても高い"), CTX, SETTINGS)
+    errors = validate(good(confidence="とても高い"), CTX, SETTINGS, capital=550_000.0)
     assert any("confidence" in e for e in errors)
 
 
 def test_rejects_empty_rationale():
-    errors = validate(good(rationale="  "), CTX, SETTINGS)
+    errors = validate(good(rationale="  "), CTX, SETTINGS, capital=550_000.0)
     assert any("rationale" in e for e in errors)
 
 
@@ -95,7 +95,7 @@ def test_rejects_empty_rationale():
 
 def test_accepts_entry_price_matching_last_price():
     # entry_price(1200.0) は candidates の last_price(1200.0) と一致
-    assert validate(good(), CTX, SETTINGS) == []
+    assert validate(good(), CTX, SETTINGS, capital=550_000.0) == []
 
 
 def test_accepts_entry_price_at_plus_10_percent_boundary():
@@ -109,9 +109,9 @@ def test_accepts_entry_price_at_plus_10_percent_boundary():
         # 上限137,500円 → 1320円で104株。100株単位なので100株が上限
         quantity=100,
     )
-    assert validate(d, CTX, SETTINGS) == []
+    assert validate(d, CTX, SETTINGS, capital=550_000.0) == []
     # 次に出せる株数(200株)は上限を超えるので却下される
-    assert validate(dict(d, quantity=200), CTX, SETTINGS) != []
+    assert validate(dict(d, quantity=200), CTX, SETTINGS, capital=550_000.0) != []
 
 
 def test_accepts_entry_price_at_minus_10_percent_boundary():
@@ -124,12 +124,12 @@ def test_accepts_entry_price_at_minus_10_percent_boundary():
         # 上限137,500円 → 1080円で127株。100株単位なので100株が上限
         quantity=100,
     )
-    assert validate(d, CTX, SETTINGS) == []
+    assert validate(d, CTX, SETTINGS, capital=550_000.0) == []
 
 
 def test_rejects_entry_price_far_from_last_price():
     # 実際の株価は1200円なのに、買値100円は明らかにおかしい(捏造や勘違いの疑い)
-    errors = validate(good(entry_price=100.0), CTX, SETTINGS)
+    errors = validate(good(entry_price=100.0), CTX, SETTINGS, capital=550_000.0)
     assert any("1200" in e and "100" in e for e in errors)
 
 
@@ -140,7 +140,7 @@ def test_rejects_when_last_price_missing_from_candidate():
         "candidates": [{"symbol": "3993.T"}],
         "rule_version": "v1",
     }
-    errors = validate(good(), ctx, SETTINGS)
+    errors = validate(good(), ctx, SETTINGS, capital=550_000.0)
     assert any("last_price" in e for e in errors)
 
 
@@ -182,18 +182,18 @@ def good_sell(**overrides) -> dict:
 def test_accepts_sell_of_exact_held_quantity():
     # 境界: 保有株数ちょうどの売りは通る
     ctx = dict(CTX, positions=[{"symbol": "3993.T", "quantity": 100, "bucket": "じっくり"}])
-    assert validate(good_sell(quantity=100), ctx, SETTINGS) == []
+    assert validate(good_sell(quantity=100), ctx, SETTINGS, capital=550_000.0) == []
 
 
 def test_rejects_sell_of_symbol_not_held():
     ctx = dict(CTX, positions=[])
-    errors = validate(good_sell(), ctx, SETTINGS)
+    errors = validate(good_sell(), ctx, SETTINGS, capital=550_000.0)
     assert any("保有" in e for e in errors)
 
 
 def test_rejects_sell_exceeding_held_quantity():
     ctx = dict(CTX, positions=[{"symbol": "3993.T", "quantity": 100, "bucket": "じっくり"}])
-    errors = validate(good_sell(quantity=200), ctx, SETTINGS)
+    errors = validate(good_sell(quantity=200), ctx, SETTINGS, capital=550_000.0)
     # 却下メッセージに保有株数(100)と売却しようとした株数(200)の両方が含まれる
     assert any("100" in e and "200" in e for e in errors)
 
@@ -206,27 +206,27 @@ def test_rejects_sell_exceeding_held_quantity():
 
 
 def test_rejects_entry_price_none_without_raising():
-    errors = validate(good(entry_price=None), CTX, SETTINGS)
+    errors = validate(good(entry_price=None), CTX, SETTINGS, capital=550_000.0)
     assert any("entry_price" in e for e in errors)
 
 
 def test_rejects_entry_price_non_numeric_string():
-    errors = validate(good(entry_price="2450円"), CTX, SETTINGS)
+    errors = validate(good(entry_price="2450円"), CTX, SETTINGS, capital=550_000.0)
     assert any("entry_price" in e and "2450円" in e for e in errors)
 
 
 def test_rejects_quantity_non_numeric_string():
-    errors = validate(good(quantity="many"), CTX, SETTINGS)
+    errors = validate(good(quantity="many"), CTX, SETTINGS, capital=550_000.0)
     assert any("quantity" in e and "many" in e for e in errors)
 
 
 def test_rejects_take_profit_none_without_raising():
-    errors = validate(good(take_profit=None), CTX, SETTINGS)
+    errors = validate(good(take_profit=None), CTX, SETTINGS, capital=550_000.0)
     assert any("take_profit" in e for e in errors)
 
 
 def test_rejects_stop_loss_non_numeric_string_without_raising():
-    errors = validate(good(stop_loss="安全圏"), CTX, SETTINGS)
+    errors = validate(good(stop_loss="安全圏"), CTX, SETTINGS, capital=550_000.0)
     assert any("stop_loss" in e and "安全圏" in e for e in errors)
 
 
@@ -234,24 +234,24 @@ def test_rejects_stop_loss_non_numeric_string_without_raising():
 
 
 def test_rejects_zero_quantity_on_buy():
-    errors = validate(good(quantity=0), CTX, SETTINGS)
+    errors = validate(good(quantity=0), CTX, SETTINGS, capital=550_000.0)
     assert any("quantity" in e for e in errors)
 
 
 def test_rejects_negative_quantity_on_buy():
-    errors = validate(good(quantity=-5), CTX, SETTINGS)
+    errors = validate(good(quantity=-5), CTX, SETTINGS, capital=550_000.0)
     assert any("quantity" in e for e in errors)
 
 
 def test_rejects_zero_quantity_on_sell():
     ctx = dict(CTX, positions=[{"symbol": "3993.T", "quantity": 10}])
-    errors = validate(good_sell(quantity=0), ctx, SETTINGS)
+    errors = validate(good_sell(quantity=0), ctx, SETTINGS, capital=550_000.0)
     assert any("quantity" in e for e in errors)
 
 
 def test_rejects_negative_quantity_on_sell():
     ctx = dict(CTX, positions=[{"symbol": "3993.T", "quantity": 10}])
-    errors = validate(good_sell(quantity=-5), ctx, SETTINGS)
+    errors = validate(good_sell(quantity=-5), ctx, SETTINGS, capital=550_000.0)
     assert any("quantity" in e for e in errors)
 
 
@@ -259,7 +259,7 @@ def test_rejects_non_integer_quantity():
     # 100.9株のような端数は、切り捨てて100として静かに通してしまうと、
     # 検証した値(100)と decision に残った値(100.9)が食い違う原因になる。
     # 整数でなければそもそも却下する。
-    errors = validate(good(quantity=100.9), CTX, SETTINGS)
+    errors = validate(good(quantity=100.9), CTX, SETTINGS, capital=550_000.0)
     assert any("quantity" in e and "整数" in e for e in errors)
 
 
@@ -268,7 +268,7 @@ def test_normalizes_whole_number_float_quantity_to_int():
     # 自体が持つ値は int の 100 に揃える。insert_proposals はこの decision の
     # 値をそのまま使うため、検証した値と保存される値を一致させるために必要。
     d = good(quantity=100.0)
-    errors = validate(d, CTX, SETTINGS)
+    errors = validate(d, CTX, SETTINGS, capital=550_000.0)
     assert errors == []
     assert d["quantity"] == 100
     assert isinstance(d["quantity"], int)
@@ -329,7 +329,7 @@ def test_process_records_gap_when_no_candidates_and_no_decisions():
     }
     patcher, calls = _patched_record_gap()
     with patcher:
-        process(None, ctx, [], "journal/2026-09-07.md", SETTINGS)
+        process(None, ctx, [], "journal/2026-09-07.md", SETTINGS, capital=550_000.0)
 
     assert len(calls) == 1
     scope, detail = calls[0]
@@ -348,7 +348,7 @@ def test_process_records_gap_when_candidates_present_but_zero_decisions():
     }
     patcher, calls = _patched_record_gap()
     with patcher:
-        process(None, ctx, [], "journal/2026-09-07.md", SETTINGS)
+        process(None, ctx, [], "journal/2026-09-07.md", SETTINGS, capital=550_000.0)
 
     assert len(calls) == 1
     scope, detail = calls[0]
@@ -369,11 +369,11 @@ def test_no_candidates_and_candidates_present_cases_are_distinguishable():
 
     patcher1, calls1 = _patched_record_gap()
     with patcher1:
-        process(None, ctx_empty, [], "journal/2026-09-07.md", SETTINGS)
+        process(None, ctx_empty, [], "journal/2026-09-07.md", SETTINGS, capital=550_000.0)
 
     patcher2, calls2 = _patched_record_gap()
     with patcher2:
-        process(None, ctx_with_candidates, [], "journal/2026-09-07.md", SETTINGS)
+        process(None, ctx_with_candidates, [], "journal/2026-09-07.md", SETTINGS, capital=550_000.0)
 
     detail_empty = calls1[0][1]
     detail_with_candidates = calls2[0][1]
@@ -394,7 +394,7 @@ def test_process_does_not_record_gap_when_something_accepted(tmp_path):
     journal = _journal_for(tmp_path, ["3993.T"])
     patcher, calls = _patched_record_gap()
     with patcher, patch("investment.jobs.apply_decision.insert_proposals") as fake_insert:
-        process(None, CTX, [good()], journal, SETTINGS)
+        process(None, CTX, [good()], journal, SETTINGS, capital=550_000.0)
 
     assert calls == []
     fake_insert.assert_called_once()
@@ -410,7 +410,7 @@ def test_process_does_not_record_gap_when_something_rejected():
 
     patcher, calls = _patched_record_gap()
     with patcher, patch("investment.jobs.apply_decision.record_rejections") as fake_reject:
-        process(None, CTX, [bad_decision], "journal/2026-09-07.md", SETTINGS)
+        process(None, CTX, [bad_decision], "journal/2026-09-07.md", SETTINGS, capital=550_000.0)
 
     assert calls == []
     fake_reject.assert_called_once()
@@ -504,7 +504,7 @@ def test_rejects_quantity_that_is_not_a_multiple_of_the_lot_size():
     AI は「上限金額 ÷ 株価」で株数を出しがちだが、日本株は100株単位でしか
     注文できない。この検証が無いと、実際には発注できない提案が通ってしまう。
     """
-    errors = validate(good(quantity=137), CTX, SETTINGS)
+    errors = validate(good(quantity=137), CTX, SETTINGS, capital=550_000.0)
     assert any("100株単位" in e for e in errors)
 
 
@@ -522,7 +522,7 @@ def test_rejects_buy_when_one_lot_exceeds_the_position_limit():
         stop_loss=2704.0 * 0.92,
         quantity=100,
     )
-    errors = validate(d, ctx, SETTINGS)
+    errors = validate(d, ctx, SETTINGS, capital=550_000.0)
     assert any("上限" in e for e in errors)
 
 
@@ -536,7 +536,7 @@ def test_us_stocks_are_not_subject_to_the_100_share_unit():
         stop_loss=184.0,
         quantity=137,  # 日本株なら却下される端数だが、米国株では正当
     )
-    assert validate(d, ctx, SETTINGS) == []
+    assert validate(d, ctx, SETTINGS, capital=550_000.0) == []
 
 
 # --- 却下理由が事実と合っていること -----------------------------------------
@@ -553,7 +553,7 @@ def test_rejection_says_risk_limit_when_the_stop_is_too_wide():
     # 損切りが -9.2%（ルールの -8% より広い）。金額は上限内だが損失が上限を超える
     d = good(entry_price=1300.0, take_profit=1300.0 * 1.22, stop_loss=1180.0, quantity=100)
     ctx = dict(CTX, candidates=[{"symbol": "3993.T", "last_price": 1300.0}])
-    errors = validate(d, ctx, SETTINGS)
+    errors = validate(d, ctx, SETTINGS, capital=550_000.0)
 
     assert any("損失" in e for e in errors), errors
     # 金額の上限を超えていないのに「金額の上限」と言ってはいけない
@@ -565,7 +565,7 @@ def test_rejection_says_position_limit_when_one_lot_costs_too_much():
     d = good(entry_price=2704.0, take_profit=2704.0 * 1.22, stop_loss=2704.0 * 0.92,
              quantity=100, symbol="3723.T")
     ctx = dict(CTX, candidates=[{"symbol": "3723.T", "last_price": 2704.0}])
-    errors = validate(d, ctx, SETTINGS)
+    errors = validate(d, ctx, SETTINGS, capital=550_000.0)
 
     assert any("1銘柄の上限" in e for e in errors), errors
 
@@ -580,14 +580,14 @@ def test_rejects_partial_sell_that_is_not_a_multiple_of_the_lot_size():
     決めており、売りも100株単位でしか注文できない。
     """
     ctx = dict(CTX, positions=[{"symbol": "3993.T", "quantity": 100}])
-    errors = validate(good_sell(quantity=50), ctx, SETTINGS)
+    errors = validate(good_sell(quantity=50), ctx, SETTINGS, capital=550_000.0)
     assert any("100株単位" in e for e in errors), errors
 
 
 def test_accepts_partial_sell_of_a_whole_number_of_lots():
     """300株保有のうち100株だけ売るのは正当。"""
     ctx = dict(CTX, positions=[{"symbol": "3993.T", "quantity": 300, "bucket": "じっくり"}])
-    assert validate(good_sell(quantity=100), ctx, SETTINGS) == []
+    assert validate(good_sell(quantity=100), ctx, SETTINGS, capital=550_000.0) == []
 
 
 def test_accepts_selling_the_entire_holding_even_if_it_is_not_a_whole_lot():
@@ -597,7 +597,7 @@ def test_accepts_selling_the_entire_holding_even_if_it_is_not_a_whole_lot():
     「全部売る」を却下すると、持ち続けるしかなくなってしまう。
     """
     ctx = dict(CTX, positions=[{"symbol": "3993.T", "quantity": 37, "bucket": "じっくり"}])
-    assert validate(good_sell(quantity=37), ctx, SETTINGS) == []
+    assert validate(good_sell(quantity=37), ctx, SETTINGS, capital=550_000.0) == []
 
 
 # --- AIの判断ファイルが無い場合 ---------------------------------------------
@@ -686,22 +686,44 @@ def _fast(**overrides) -> dict:
     return d
 
 
+def test_validate_uses_the_capital_it_is_given_not_the_context():
+    """総資金は呼び出し側（データベースを読んだ側）から受け取ること。
+
+    context.json は AI が書き換えられる場所にあるので、そこの数字で
+    株数の上限を決めてはいけない。枠の利確・損切り幅と同じ理由。
+    """
+    ctx = _ctx_with_buckets()
+    # コンテキスト側の総資金を10倍に改ざんしても、判定は引数の値で行われる
+    ctx["constraints"] = dict(ctx.get("constraints", {}), total_capital=5_500_000)
+
+    # 550,000円の25% = 137,500円。1,200円 × 200株 = 240,000円は上限超え
+    errors = validate(_patient(quantity=200), ctx, SETTINGS, capital=550_000.0)
+    assert any("上限" in e for e in errors), errors
+
+
+def test_validate_allows_more_shares_when_the_capital_has_grown():
+    """資金が増えたら、買える株数も増えること。"""
+    ctx = _ctx_with_buckets()
+    # 1,100,000円の25% = 275,000円。1,200円 × 200株 = 240,000円は収まる
+    assert validate(_patient(quantity=200), ctx, SETTINGS, capital=1_100_000.0) == []
+
+
 def test_accepts_a_correct_patient_proposal():
-    assert validate(_patient(), _ctx_with_buckets(), SETTINGS) == []
+    assert validate(_patient(), _ctx_with_buckets(), SETTINGS, capital=550_000.0) == []
 
 
 def test_accepts_a_correct_fast_proposal():
-    assert validate(_fast(), _ctx_with_buckets(), SETTINGS) == []
+    assert validate(_fast(), _ctx_with_buckets(), SETTINGS, capital=550_000.0) == []
 
 
 def test_rejects_a_missing_bucket():
     d = _patient()
     del d["bucket"]
-    assert any("bucket" in e for e in validate(d, _ctx_with_buckets(), SETTINGS))
+    assert any("bucket" in e for e in validate(d, _ctx_with_buckets(), SETTINGS, capital=550_000.0))
 
 
 def test_rejects_an_unknown_bucket():
-    errors = validate(_patient(bucket="なんとなく"), _ctx_with_buckets(), SETTINGS)
+    errors = validate(_patient(bucket="なんとなく"), _ctx_with_buckets(), SETTINGS, capital=550_000.0)
     assert any("なんとなく" in e for e in errors)
 
 
@@ -711,12 +733,12 @@ def test_rejects_a_take_profit_that_does_not_match_the_bucket():
     これを通すと「枠」が名前だけになり、どちらが効いているかを
     比較できなくなる。
     """
-    errors = validate(_fast(take_profit=1464.0), _ctx_with_buckets(), SETTINGS)
+    errors = validate(_fast(take_profit=1464.0), _ctx_with_buckets(), SETTINGS, capital=550_000.0)
     assert any("take_profit" in e and "回転" in e for e in errors), errors
 
 
 def test_rejects_a_stop_loss_that_does_not_match_the_bucket():
-    errors = validate(_fast(stop_loss=1104.0), _ctx_with_buckets(), SETTINGS)
+    errors = validate(_fast(stop_loss=1104.0), _ctx_with_buckets(), SETTINGS, capital=550_000.0)
     assert any("stop_loss" in e and "回転" in e for e in errors), errors
 
 
@@ -726,7 +748,7 @@ def test_allows_rounding_to_the_nearest_yen():
     d = _patient(entry_price=e, take_profit=round(e * 1.22, 2),
                  stop_loss=round(e * 0.92, 2), quantity=100)
     ctx = _ctx_with_buckets(candidates=[{"symbol": "3993.T", "last_price": 899.0}])
-    assert validate(d, ctx, SETTINGS) == []
+    assert validate(d, ctx, SETTINGS, capital=550_000.0) == []
 
 
 def test_rejects_a_buy_when_the_bucket_has_no_free_slot():
@@ -739,10 +761,10 @@ def test_rejects_a_buy_when_the_bucket_has_no_free_slot():
         {**ctx["buckets"][0], "used": 2, "free": 0},   # じっくり枠は満杯
         ctx["buckets"][1],                              # 回転枠は空いている
     ]
-    errors = validate(_patient(), ctx, SETTINGS)
+    errors = validate(_patient(), ctx, SETTINGS, capital=550_000.0)
     assert any("じっくり" in e and "空き" in e for e in errors), errors
     # 回転枠なら通る
-    assert validate(_fast(), ctx, SETTINGS) == []
+    assert validate(_fast(), ctx, SETTINGS, capital=550_000.0) == []
 
 
 def test_the_bucket_rules_come_from_the_code_not_from_the_context_file():
@@ -761,18 +783,18 @@ def test_the_bucket_rules_come_from_the_code_not_from_the_context_file():
     ]
     # 改ざんされた幅（+50%/-1%）に沿った提案は、却下されなければならない
     d = _patient(take_profit=1800.0, stop_loss=1188.0)
-    errors = validate(d, ctx, SETTINGS)
+    errors = validate(d, ctx, SETTINGS, capital=550_000.0)
     assert any("take_profit" in e for e in errors), errors
 
     # 本来の幅（+22%/-8%）に沿った提案は通る
-    assert validate(_patient(), ctx, SETTINGS) == []
+    assert validate(_patient(), ctx, SETTINGS, capital=550_000.0) == []
 
 
 def test_the_free_slot_count_still_comes_from_the_context():
     """空き枠の数は、そのときの保有状況なのでコンテキストから取る。"""
     ctx = _ctx_with_buckets()
     ctx["buckets"] = [{**ctx["buckets"][0], "used": 2, "free": 0}, ctx["buckets"][1]]
-    assert any("空き" in e for e in validate(_patient(), ctx, SETTINGS))
+    assert any("空き" in e for e in validate(_patient(), ctx, SETTINGS, capital=550_000.0))
 
 
 # --- 売りに bucket を求めない（保有から決まるため） --------------------------
@@ -788,7 +810,7 @@ def test_sell_does_not_require_the_ai_to_state_the_bucket():
     d = good_sell(quantity=100)
     del d["bucket"]
 
-    assert validate(d, ctx, SETTINGS) == []
+    assert validate(d, ctx, SETTINGS, capital=550_000.0) == []
     # 検証の副作用として、保有の枠が decision に入る（保存時に使う）
     assert d["bucket"] == "回転"
 
@@ -797,7 +819,7 @@ def test_sell_overwrites_a_bucket_the_ai_guessed_wrong():
     ctx = dict(CTX, positions=[{"symbol": "3993.T", "quantity": 100, "bucket": "回転"}])
     d = good_sell(quantity=100, bucket="じっくり")   # AIの書いた枠は間違い
 
-    assert validate(d, ctx, SETTINGS) == []
+    assert validate(d, ctx, SETTINGS, capital=550_000.0) == []
     assert d["bucket"] == "回転"   # 保有側が正
 
 
@@ -807,7 +829,7 @@ def test_sell_is_rejected_when_the_position_has_no_bucket():
     枠が分からないまま保存すると、枠ごとの成績集計から黙って漏れる。
     """
     ctx = dict(CTX, positions=[{"symbol": "3993.T", "quantity": 100}])
-    errors = validate(good_sell(quantity=100), ctx, SETTINGS)
+    errors = validate(good_sell(quantity=100), ctx, SETTINGS, capital=550_000.0)
     assert any("枠" in e for e in errors), errors
 
 
@@ -821,9 +843,9 @@ def test_validate_counts_what_was_already_accepted_in_this_batch():
     """このバッチで既に通した件数を差し引いて空きを見ること。"""
     ctx = _ctx_with_buckets()   # じっくり枠の空きは2
 
-    assert validate(_patient(symbol="3993.T"), ctx, SETTINGS, taken={}) == []
-    assert validate(_patient(symbol="3993.T"), ctx, SETTINGS, taken={"じっくり": 1}) == []
-    errors = validate(_patient(symbol="3993.T"), ctx, SETTINGS, taken={"じっくり": 2})
+    assert validate(_patient(symbol="3993.T"), ctx, SETTINGS, capital=550_000.0, taken={}) == []
+    assert validate(_patient(symbol="3993.T"), ctx, SETTINGS, capital=550_000.0, taken={"じっくり": 1}) == []
+    errors = validate(_patient(symbol="3993.T"), ctx, SETTINGS, capital=550_000.0, taken={"じっくり": 2})
     assert any("空き" in e for e in errors), errors
 
 
@@ -839,9 +861,9 @@ def test_validate_stops_at_the_overall_limit_across_buckets():
         {**ctx["buckets"][1], "used": 3, "free": 0},
     ]
     # 1件目は通る
-    assert validate(_patient(), ctx, SETTINGS, taken={}) == []
+    assert validate(_patient(), ctx, SETTINGS, capital=550_000.0, taken={}) == []
     # 2件目は全体の上限で止まる
-    errors = validate(_fast(), ctx, SETTINGS, taken={"じっくり": 1})
+    errors = validate(_fast(), ctx, SETTINGS, capital=550_000.0, taken={"じっくり": 1})
     assert any("空き" in e for e in errors), errors
 
 
@@ -868,7 +890,7 @@ def test_process_rejects_the_third_buy_into_a_two_slot_bucket(tmp_path):
         patch("investment.jobs.apply_decision.insert_proposals") as insert,
         patch("investment.jobs.apply_decision.record_rejections") as reject,
     ):
-        accepted, rejected = process(None, ctx, decisions, journal, SETTINGS)
+        accepted, rejected = process(None, ctx, decisions, journal, SETTINGS, capital=550_000.0)
 
     assert (accepted, rejected) == (2, 1)
     assert [d["symbol"] for d in insert.call_args.args[1]] == ["1.T", "2.T"]
@@ -893,7 +915,7 @@ def test_process_counts_the_two_buckets_separately(tmp_path):
         patch("investment.jobs.apply_decision.insert_proposals"),
         patch("investment.jobs.apply_decision.record_rejections"),
     ):
-        accepted, rejected = process(None, ctx, decisions, journal, SETTINGS)
+        accepted, rejected = process(None, ctx, decisions, journal, SETTINGS, capital=550_000.0)
 
     assert (accepted, rejected) == (4, 0)
 
@@ -914,7 +936,7 @@ def test_process_records_a_sell_whose_bucket_disagreed_with_the_holding(tmp_path
         patch("investment.jobs.apply_decision.record_rejections") as record,
     ):
         accepted, rejected = process(
-            None, ctx, [d], _journal_for(tmp_path, ["3993.T"]), SETTINGS
+            None, ctx, [d], _journal_for(tmp_path, ["3993.T"]), SETTINGS, capital=550_000.0
         )
 
     assert (accepted, rejected) == (1, 0)          # 却下はしない
@@ -1001,7 +1023,7 @@ def test_process_records_a_gap_when_the_journal_is_missing(tmp_path):
         patch("investment.jobs.apply_decision.record_gap") as gap,
     ):
         accepted, rejected = process(
-            None, ctx, [_patient(symbol="1.T")], str(tmp_path / "ない.md"), SETTINGS
+            None, ctx, [_patient(symbol="1.T")], str(tmp_path / "ない.md"), SETTINGS, capital=550_000.0
         )
 
     assert (accepted, rejected) == (1, 0)   # 判断そのものは保存する

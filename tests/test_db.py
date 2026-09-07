@@ -10,6 +10,7 @@ from investment.db import (
     connect,
     record_gap,
     record_gaps,
+    select_capital,
     select_screened,
     upsert_fundamentals,
 )
@@ -176,3 +177,51 @@ def test_every_bucket_defined_in_the_code_can_actually_be_saved(conn):
         assert [r["bucket"] for r in cur.fetchall()] == [b.name for b in BUCKETS]
         cur.execute("SELECT bucket FROM positions ORDER BY symbol")
         assert sorted(r["bucket"] for r in cur.fetchall()) == sorted(b.name for b in BUCKETS)
+
+
+def test_select_capital_is_cash_plus_the_cost_of_what_we_hold(conn):
+    """総資金 = 現金 + 保有の取得原価。
+
+    現在の株価は使わない。含み益で次に買う金額が膨らむとリスクが勝手に増えるし、
+    通信の失敗で総資金の計算が止まるのも筋が悪い。
+    """
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO cash (currency, amount) VALUES ('JPY', 300000)")
+        cur.execute(
+            """
+            INSERT INTO positions
+                (symbol, quantity, avg_price, currency, take_profit, stop_loss,
+                 opened_at, bucket)
+            VALUES ('1111.T', 100, 1200, 'JPY', 1464, 1104, NOW(), 'じっくり')
+            """
+        )
+    conn.commit()
+
+    # 現金 300,000 + 100株 × 1,200円 = 420,000
+    assert select_capital(conn) == 420000.0
+
+
+def test_select_capital_with_no_positions_is_just_the_cash(conn):
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO cash (currency, amount) VALUES ('JPY', 550000)")
+    conn.commit()
+
+    assert select_capital(conn) == 550000.0
+
+
+def test_select_capital_is_zero_when_nothing_has_been_deposited(conn):
+    """入金前でも例外を投げず 0 を返す。呼び出し側で「買えない」と判断できる。"""
+    assert select_capital(conn) == 0.0
+
+
+def test_select_capital_ignores_currencies_other_than_yen(conn):
+    """いまは日本株だけを扱う。ドルを円に足すと桁が狂うので数えない。
+
+    米国株を有効にするときに、為替を掛けて足す形へ直す。
+    """
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO cash (currency, amount) VALUES ('JPY', 100000)")
+        cur.execute("INSERT INTO cash (currency, amount) VALUES ('USD', 5000)")
+    conn.commit()
+
+    assert select_capital(conn) == 100000.0
