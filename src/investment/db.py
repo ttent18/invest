@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 from psycopg.rows import dict_row
 
 from investment.config import ScreenCriteria
+from investment.fills import FillError
 from investment.market import Fundamentals
 
 MIGRATIONS_DIR = Path(__file__).resolve().parents[2] / "migrations"
@@ -185,3 +186,101 @@ def init_cash(conn, jpy: float) -> int:
             inserted += cur.rowcount
     conn.commit()
     return inserted
+
+
+def select_unapplied_fills(conn) -> list[dict]:
+    """まだ保有・現金に反映していない申告を、古い順に返す。
+
+    古い順に処理しないと、買う前に売ることになって反映に失敗する。
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM fills WHERE applied_at IS NULL ORDER BY id")
+        return [dict(r) for r in cur.fetchall()]
+
+
+def mark_fill_failed(conn, fill_id: int, reason: str) -> None:
+    """反映できなかった理由を記録する。行は消さず、未反映のまま残す。
+
+    消してしまうと、利用者は「記録したはずなのに無い」という状態に置かれ、
+    原因も分からなくなる。
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE fills SET apply_error = %s WHERE id = %s", (reason, fill_id)
+        )
+    conn.commit()
+
+
+def save_fill_result(
+    conn,
+    fill_id: int,
+    position,
+    cash_delta: float,
+    trade: dict,
+    currency: str,
+) -> None:
+    """1件の申告の反映を、まとめて1つのトランザクションで書き込む。
+
+    取引の追加・保有の更新・現金の増減・申告を反映済みにする、の4つは
+    途中で止まると帳尻が合わなくなるため、必ず全部成功か全部取り消しにする。
+
+    position が None なら、その銘柄の保有を削除する（全部売った場合）。
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO trades
+                (executed_at, symbol, side, quantity, price, currency, fee,
+                 bucket, realized_pnl, holding_days)
+            VALUES (NOW(), %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                trade["symbol"], trade["side"], trade["quantity"], trade["price"],
+                trade["currency"], trade["fee"], trade["bucket"],
+                trade["realized_pnl"], trade["holding_days"],
+            ),
+        )
+
+        if position is None:
+            cur.execute("DELETE FROM positions WHERE symbol = %s", (trade["symbol"],))
+        else:
+            # opened_at は ON CONFLICT の更新対象に入れない。買い増しても
+            # 「最初に持った日」を動かさないため。動かすと回転枠の期限
+            # （10営業日）が買い増すたびにリセットされてしまう。
+            cur.execute(
+                """
+                INSERT INTO positions
+                    (symbol, quantity, avg_price, currency, take_profit, stop_loss,
+                     opened_at, bucket)
+                VALUES (%s, %s, %s, %s, %s, %s, NOW(), %s)
+                ON CONFLICT (symbol) DO UPDATE SET
+                    quantity    = EXCLUDED.quantity,
+                    avg_price   = EXCLUDED.avg_price,
+                    take_profit = EXCLUDED.take_profit,
+                    stop_loss   = EXCLUDED.stop_loss,
+                    bucket      = EXCLUDED.bucket
+                """,
+                (
+                    position.symbol, position.quantity, position.avg_price, currency,
+                    position.take_profit, position.stop_loss, position.bucket,
+                ),
+            )
+
+        cur.execute(
+            "UPDATE cash SET amount = amount + %s WHERE currency = %s",
+            (cash_delta, currency),
+        )
+        # この通貨の行が cash に無いと、UPDATE は1行も変えずに終わり、
+        # 何もエラーが起きないまま現金だけが反映されない状態になる。
+        # rowcount で更新できたか必ず確認し、0行なら例外にしてトランザクション
+        # 全体を取り消す（fills も未反映のまま残るので、あとで気づける）。
+        if cur.rowcount == 0:
+            raise FillError(
+                f"現金（{currency}）の残高が登録されていません。"
+                "init_cash などで先に現金の行を作ってください"
+            )
+        cur.execute(
+            "UPDATE fills SET applied_at = NOW(), apply_error = NULL WHERE id = %s",
+            (fill_id,),
+        )
+    conn.commit()

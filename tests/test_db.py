@@ -8,10 +8,12 @@ from investment.config import SCREEN
 from investment.db import (
     apply_migrations,
     connect,
+    mark_fill_failed,
     record_gap,
     record_gaps,
     select_capital,
     select_screened,
+    select_unapplied_fills,
     upsert_fundamentals,
 )
 from investment.market import Fundamentals
@@ -301,3 +303,41 @@ def test_push_subscriptions_are_unique_per_endpoint(conn):
         cur.execute("SELECT COUNT(*) AS c FROM push_subscriptions")
         assert cur.fetchone()["c"] == 1
     conn.commit()
+
+
+def test_select_unapplied_fills_returns_only_the_ones_not_yet_applied(conn):
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO fills (symbol, side, quantity, price, currency, applied_at)
+            VALUES ('1111.T', 'buy', 100, 900, 'JPY', NOW()),
+                   ('2222.T', 'buy', 100, 800, 'JPY', NULL),
+                   ('3333.T', 'sell', 100, 700, 'JPY', NULL)
+            """
+        )
+    conn.commit()
+
+    rows = select_unapplied_fills(conn)
+
+    assert [r["symbol"] for r in rows] == ["2222.T", "3333.T"]   # 古い順
+
+
+def test_mark_fill_failed_keeps_the_row_and_records_the_reason(conn):
+    """反映できなかった記録を消さないこと。理由を残して利用者に見せる。"""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO fills (symbol, side, quantity, price, currency)
+            VALUES ('1111.T', 'sell', 100, 900, 'JPY') RETURNING id
+            """
+        )
+        fill_id = cur.fetchone()["id"]
+    conn.commit()
+
+    mark_fill_failed(conn, fill_id, "1111.T を保有していません")
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT applied_at, apply_error FROM fills WHERE id = %s", (fill_id,))
+        row = cur.fetchone()
+    assert row["applied_at"] is None                      # 未反映のまま
+    assert "保有していません" in row["apply_error"]
