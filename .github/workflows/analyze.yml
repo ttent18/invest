@@ -49,6 +49,11 @@ jobs:
           PYTHONPATH: src
 
       - name: journal をコミットする
+        # 前のステップ(判断を検証して保存する)が失敗しても、このステップは実行する。
+        # AIの調査・判断・振り返りは journal に既に書かれている。
+        # 検証ステップの失敗(例: 想定外の型が混ざっていた)を理由に journal の
+        # コミットまで飛ばしてしまうと、AIの調査結果そのものが失われてしまう。
+        if: always()
         run: |
           git config user.name "investment-bot"
           git config user.email "noreply@example.com"

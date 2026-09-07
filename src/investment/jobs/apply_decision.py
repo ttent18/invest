@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 from investment.config import SETTINGS, Settings
-from investment.db import connect
+from investment.db import connect, record_gap
 from investment.market import is_japanese
 from investment.sizing import position_size, required_win_rate
 
@@ -29,8 +29,53 @@ VALID_ACTION = {"buy", "sell"}
 ENTRY_PRICE_TOLERANCE = 0.10
 
 
+def _to_float(decision: dict, field: str) -> tuple[float | None, str | None]:
+    """decision[field] を float に変換する。失敗したら (None, エラーメッセージ)。
+
+    AIの出力はJSONなので、null(→None)や、桁を勘違いした文字列
+    (例: "2450円")が混ざりうる。これまでは float() を無条件に呼んでおり、
+    TypeError / ValueError が validate() の外へ漏れて main() ごと失敗させ、
+    同じバッチの正当な提案や journal のコミットまで道連れにしていた。
+    ここで例外を吸収し、却下メッセージに変換する。
+    """
+    value = decision[field]
+    try:
+        return float(value), None
+    except (TypeError, ValueError):
+        return None, f"{field} が数値として解釈できません（値: {value!r}）"
+
+
+def _to_positive_int_quantity(decision: dict) -> tuple[int | None, str | None]:
+    """decision["quantity"] を1以上の整数に変換する。失敗したら (None, エラーメッセージ)。
+
+    quantity=0 や負の値は買い・売りどちらの既存チェックも素通りしていた
+    (買いは上限チェックのみ、売りは保有超過チェックのみだったため)。
+    また、33.9のような端数を int() で暗黙に切り捨てて33として検証すると、
+    検証した値(33)と decision に残ったままの値(33.9)が食い違い、
+    後段の insert_proposals には生の値(33.9)が渡ってしまう。
+    そのため端数がある場合はここで却下し、整数のときだけ int を返す。
+    """
+    value = decision["quantity"]
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None, f"quantity が数値として解釈できません（値: {value!r}）"
+    if f != int(f):
+        return None, f"quantity は整数である必要があります（値: {value!r}）"
+    n = int(f)
+    if n < 1:
+        return None, f"quantity は1以上である必要があります（値: {value!r}）"
+    return n, None
+
+
 def validate(decision: dict, ctx: dict, settings: Settings) -> list[str]:
-    """判断が制約を満たすか調べる。問題があればメッセージを返す。"""
+    """判断が制約を満たすか調べる。問題があればメッセージを返す。
+
+    検証に通った場合、decision["quantity"] は検証で使った整数値に
+    正規化される(例: 33.0 → 33)。insert_proposals はこの decision を
+    そのまま使うため、検証した値と実際に保存される値を一致させるための
+    副作用として行っている。
+    """
     errors: list[str] = []
 
     for field in REQUIRED_FIELDS:
@@ -48,10 +93,22 @@ def validate(decision: dict, ctx: dict, settings: Settings) -> list[str]:
     if not str(decision["scenario"]).strip():
         errors.append("scenario が空です")
 
-    entry = float(decision["entry_price"])
-    tp = float(decision["take_profit"])
-    sl = float(decision["stop_loss"])
-    if not (sl < entry < tp):
+    entry, err = _to_float(decision, "entry_price")
+    if err:
+        errors.append(err)
+    tp, err = _to_float(decision, "take_profit")
+    if err:
+        errors.append(err)
+    sl, err = _to_float(decision, "stop_loss")
+    if err:
+        errors.append(err)
+    quantity, err = _to_positive_int_quantity(decision)
+    if err:
+        errors.append(err)
+    else:
+        decision["quantity"] = quantity
+
+    if entry is not None and tp is not None and sl is not None and not (sl < entry < tp):
         errors.append("stop_loss < entry_price < take_profit である必要があります")
 
     if decision["action"] == "buy":
@@ -64,7 +121,7 @@ def validate(decision: dict, ctx: dict, settings: Settings) -> list[str]:
             errors.append(
                 f"{decision['symbol']} の候補データに last_price (実際の株価) がありません"
             )
-        else:
+        elif entry is not None:
             last_price = float(candidate["last_price"])
             lower = last_price * (1 - ENTRY_PRICE_TOLERANCE)
             upper = last_price * (1 + ENTRY_PRICE_TOLERANCE)
@@ -78,7 +135,7 @@ def validate(decision: dict, ctx: dict, settings: Settings) -> list[str]:
         if not ctx["can_open_new"]:
             errors.append("同時保有の上限に達しているため新規に買えません")
 
-        if sl < entry:
+        if entry is not None and sl is not None and quantity is not None and sl < entry:
             allowed = position_size(
                 settings.total_capital,
                 settings.risk_per_trade_pct,
@@ -86,10 +143,8 @@ def validate(decision: dict, ctx: dict, settings: Settings) -> list[str]:
                 entry,
                 sl,
             )
-            if int(decision["quantity"]) > allowed:
-                errors.append(
-                    f"quantity {decision['quantity']} が上限 {allowed} 株を超えています"
-                )
+            if quantity > allowed:
+                errors.append(f"quantity {quantity} が上限 {allowed} 株を超えています")
 
     elif decision["action"] == "sell":
         # 買いだけ疑って売りを信用する理由はない。AIが保有していない銘柄を
@@ -104,9 +159,9 @@ def validate(decision: dict, ctx: dict, settings: Settings) -> list[str]:
 
         if position is None:
             errors.append(f"{decision['symbol']} を保有していないため売却できません")
-        else:
+        elif quantity is not None:
             held = int(position["quantity"])
-            requested = int(decision["quantity"])
+            requested = quantity
             if requested > held:
                 errors.append(
                     f"{decision['symbol']} の売却株数 {requested} が保有株数 {held} を"
@@ -176,6 +231,20 @@ def insert_proposals(conn, decisions: list[dict], journal_path: str) -> int:
     return len(decisions)
 
 
+def record_rejections(conn, rejected: list[tuple[str, list[str]]]) -> None:
+    """却下された提案を data_gaps に記録する。proposals には入れない。
+
+    却下された提案は quantity<=0 のように proposals の CHECK 制約に
+    違反しうる値を持つことがあるため、そのまま insert すると失敗し、
+    バッチ全体(正当な提案や journal のコミットも含む)を道連れにしてしまう。
+    data_gaps には制約が無く、scope・detail に自由なテキストを持てるため、
+    ここに却下理由の全文を残す。「AIが何を間違えるか」を測るうえで、
+    却下された判断こそ最も価値の高い信号であり、記録から漏らしてはならない。
+    """
+    for symbol, errors in rejected:
+        record_gap(conn, scope=f"proposal_rejected:{symbol}", detail="; ".join(errors))
+
+
 def main() -> int:
     ctx = json.loads(Path("build/context.json").read_text(encoding="utf-8"))
     raw = json.loads(Path("build/decision.json").read_text(encoding="utf-8"))
@@ -193,9 +262,12 @@ def main() -> int:
     for symbol, errors in rejected:
         print(f"却下 {symbol}: {'; '.join(errors)}")
 
-    if accepted:
+    if accepted or rejected:
         with connect() as conn:
-            insert_proposals(conn, accepted, journal_path)
+            if accepted:
+                insert_proposals(conn, accepted, journal_path)
+            if rejected:
+                record_rejections(conn, rejected)
 
     print(f"採用 {len(accepted)} 件 / 却下 {len(rejected)} 件")
     return 0

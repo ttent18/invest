@@ -114,6 +114,73 @@ def test_run_skips_write_and_records_gap_when_success_rate_below_threshold():
     assert gap.call_count == 3
 
 
+def test_run_treats_all_fields_none_as_failure_not_success():
+    """C1: yfinance がレート制限で info={} を返すと、例外を投げずに全項目 None の
+    Fundamentals が返ってくる。これを「取得成功」と数えてしまうと、成功率100%の
+    まま空の行が upsert され、ON CONFLICT で前回の正常なデータを上書きしてしまう。
+    全項目が None の場合は取得失敗として扱い、保存対象からも除外されるべき。
+    """
+    saved: list[Fundamentals] = []
+
+    def fake_upsert(conn, rows, as_of):
+        saved.extend(rows)
+        return len(rows)
+
+    def fake_fetch(code):
+        if code == "8888":
+            # 例外を投げない。yfinance がレート制限等で空の info を返した状態の再現。
+            return Fundamentals(f"{code}.T", "8888.T", None, None, None, None, None)
+        return Fundamentals(f"{code}.T", "会社", 1.0, 2.0, 3.0, 4.0, 5.0)
+
+    symbols = [f"{1000 + i}" for i in range(9)] + ["8888"]  # 10銘柄中1件が空データ
+
+    with (
+        patch("investment.jobs.run_screen.fetch_fundamentals", side_effect=fake_fetch),
+        patch("investment.jobs.run_screen.upsert_fundamentals", side_effect=fake_upsert),
+        patch("investment.jobs.run_screen.record_gap") as gap,
+    ):
+        ok, failed, written = run(symbols, conn=None, as_of=date(2026, 9, 7))
+
+    # 空データの1件は失敗として数えられ、保存対象に含まれない
+    assert ok == 9
+    assert failed == 1
+    assert "8888.T" not in [f.symbol for f in saved]
+    assert written is True
+    # data_gaps に記録される
+    gap.assert_called_once()
+
+
+def test_run_treats_partial_none_fields_as_success():
+    """一部の項目だけが None(例: ROEだけ取れない)なのは正常な欠損であり、
+    従来どおり取得成功として扱う。全項目が空の場合とは区別すること。
+    """
+    saved: list[Fundamentals] = []
+
+    def fake_upsert(conn, rows, as_of):
+        saved.extend(rows)
+        return len(rows)
+
+    def fake_fetch(code):
+        if code == "7777":
+            return Fundamentals(f"{code}.T", "一部欠損の会社", 1.0, 2.0, 3.0, None, 5.0)
+        return Fundamentals(f"{code}.T", "会社", 1.0, 2.0, 3.0, 4.0, 5.0)
+
+    symbols = [f"{1000 + i}" for i in range(9)] + ["7777"]
+
+    with (
+        patch("investment.jobs.run_screen.fetch_fundamentals", side_effect=fake_fetch),
+        patch("investment.jobs.run_screen.upsert_fundamentals", side_effect=fake_upsert),
+        patch("investment.jobs.run_screen.record_gap") as gap,
+    ):
+        ok, failed, written = run(symbols, conn=None, as_of=date(2026, 9, 7))
+
+    assert ok == 10
+    assert failed == 0
+    assert written is True
+    assert "7777.T" in [f.symbol for f in saved]
+    gap.assert_not_called()
+
+
 def test_run_writes_at_exactly_threshold_boundary():
     """成功率がちょうど90%（閾値以上）のとき、書き込みが行われる。"""
     assert SUCCESS_RATE_THRESHOLD == 0.9

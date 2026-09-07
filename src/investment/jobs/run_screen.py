@@ -11,7 +11,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from investment.db import connect, record_gap, upsert_fundamentals
-from investment.market import Fundamentals, MarketDataError, fetch_fundamentals
+from investment.market import Fundamentals, MarketDataError, fetch_fundamentals, has_no_data
 
 SYMBOLS_JP = Path(__file__).resolve().parents[3] / "data" / "symbols_jp.txt"
 JST = ZoneInfo("Asia/Tokyo")  # 日本株の「その日」は日本時間で決める
@@ -45,10 +45,26 @@ def run(symbols: list[str], conn, as_of: date) -> tuple[int, int, bool]:
 
     for i, code in enumerate(symbols, 1):
         try:
-            fetched.append(fetch_fundamentals(code))
+            f = fetch_fundamentals(code)
         except MarketDataError as exc:
             failed += 1
             record_gap(conn, scope=f"fundamentals:{code}", detail=str(exc))
+        else:
+            # fetch_fundamentals は例外を出さずに「全項目 None」の Fundamentals を
+            # 返すことがある(yfinance がレート制限等で空の info を返した場合)。
+            # これを取得成功として数えると、成功率100%のまま空の行が upsert され、
+            # ON CONFLICT で前回の正常なデータを上書きしてしまう。
+            # 全項目が None の場合だけを「そもそも取得できていない」失敗として扱う
+            # (一部だけ None なのは正常な欠損であり、従来どおり成功として扱う)。
+            if has_no_data(f):
+                failed += 1
+                record_gap(
+                    conn,
+                    scope=f"fundamentals:{code}",
+                    detail=f"{f.symbol} は全項目が取得できませんでした（空データのため取得失敗として扱います）",
+                )
+            else:
+                fetched.append(f)
         if i % 50 == 0:
             print(f"  {i}/{len(symbols)} 件処理しました", flush=True)
         time.sleep(0.1)  # 連続アクセスを避ける

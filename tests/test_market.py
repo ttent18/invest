@@ -223,6 +223,33 @@ def test_fetch_range_raises_when_history_is_empty():
         fetch_range("7203.T", _date(2026, 9, 1), _date(2026, 9, 3))
 
 
+def test_fetch_range_raises_when_high_is_nan():
+    # I3: 高値が NaN の行を例外なしで返してしまうと、detect_hits の
+    # nan <= x / nan >= x は常に False になり、約定の見落としが静かに起きる。
+    # 兄弟の fetch_last_price と同じく NaN はガードするべき。
+    ticker = MagicMock()
+    ticker.history.return_value = _range_stub(
+        highs=[float("nan")], lows=[2450.0]
+    )
+    with (
+        patch("investment.market.yf.Ticker", return_value=ticker),
+        pytest.raises(MarketDataError),
+    ):
+        fetch_range("7203.T", _date(2026, 9, 1), _date(2026, 9, 3))
+
+
+def test_fetch_range_raises_when_low_is_nan():
+    ticker = MagicMock()
+    ticker.history.return_value = _range_stub(
+        highs=[2600.0], lows=[float("nan")]
+    )
+    with (
+        patch("investment.market.yf.Ticker", return_value=ticker),
+        pytest.raises(MarketDataError),
+    ):
+        fetch_range("7203.T", _date(2026, 9, 1), _date(2026, 9, 3))
+
+
 def test_fetch_range_raises_on_network_failure():
     with (
         patch("investment.market.yf.Ticker", side_effect=OSError("network down")),

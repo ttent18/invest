@@ -185,6 +185,107 @@ def test_rejects_sell_exceeding_held_quantity():
     assert any("5" in e and "10" in e for e in errors)
 
 
+# --- I1: 型が誤ったフィールドを渡しても例外を投げず、却下メッセージを返すこと ---
+# validate() はフィールドの存在は確認するが、これまで型を見ていなかった。
+# entry_price=None は TypeError、"2450円" のような文字列は ValueError を
+# validate() の外に漏らしていた。例外が main() まで伝播すると、そのバッチの
+# 正当な提案も journal のコミットも道連れになる。
+
+
+def test_rejects_entry_price_none_without_raising():
+    errors = validate(good(entry_price=None), CTX, SETTINGS)
+    assert any("entry_price" in e for e in errors)
+
+
+def test_rejects_entry_price_non_numeric_string():
+    errors = validate(good(entry_price="2450円"), CTX, SETTINGS)
+    assert any("entry_price" in e and "2450円" in e for e in errors)
+
+
+def test_rejects_quantity_non_numeric_string():
+    errors = validate(good(quantity="many"), CTX, SETTINGS)
+    assert any("quantity" in e and "many" in e for e in errors)
+
+
+def test_rejects_take_profit_none_without_raising():
+    errors = validate(good(take_profit=None), CTX, SETTINGS)
+    assert any("take_profit" in e for e in errors)
+
+
+def test_rejects_stop_loss_non_numeric_string_without_raising():
+    errors = validate(good(stop_loss="安全圏"), CTX, SETTINGS)
+    assert any("stop_loss" in e and "安全圏" in e for e in errors)
+
+
+# --- I2: quantity は1以上の整数であること。検証した値と保存する値を一致させる ---
+
+
+def test_rejects_zero_quantity_on_buy():
+    errors = validate(good(quantity=0), CTX, SETTINGS)
+    assert any("quantity" in e for e in errors)
+
+
+def test_rejects_negative_quantity_on_buy():
+    errors = validate(good(quantity=-5), CTX, SETTINGS)
+    assert any("quantity" in e for e in errors)
+
+
+def test_rejects_zero_quantity_on_sell():
+    ctx = dict(CTX, positions=[{"symbol": "3993.T", "quantity": 10}])
+    errors = validate(good_sell(quantity=0), ctx, SETTINGS)
+    assert any("quantity" in e for e in errors)
+
+
+def test_rejects_negative_quantity_on_sell():
+    ctx = dict(CTX, positions=[{"symbol": "3993.T", "quantity": 10}])
+    errors = validate(good_sell(quantity=-5), ctx, SETTINGS)
+    assert any("quantity" in e for e in errors)
+
+
+def test_rejects_non_integer_quantity():
+    # 33.9株のような端数は、切り捨てて33として静かに通してしまうと、
+    # 検証した値(33)と decision に残った値(33.9)が食い違う原因になる。
+    # 整数でなければそもそも却下する。
+    errors = validate(good(quantity=33.9), CTX, SETTINGS)
+    assert any("quantity" in e and "整数" in e for e in errors)
+
+
+def test_normalizes_whole_number_float_quantity_to_int():
+    # quantity=33.0 (端数のない float) は受理してよいが、検証後に decision
+    # 自体が持つ値は int の 33 に揃える。insert_proposals はこの decision の
+    # 値をそのまま使うため、検証した値と保存される値を一致させるために必要。
+    d = good(quantity=33.0)
+    errors = validate(d, CTX, SETTINGS)
+    assert errors == []
+    assert d["quantity"] == 33
+    assert isinstance(d["quantity"], int)
+
+
+# --- I5: 却下された提案は data_gaps に記録される(proposals には入れない) ---
+
+
+def test_record_rejections_writes_to_data_gaps():
+    from unittest.mock import patch
+
+    from investment.jobs.apply_decision import record_rejections
+
+    calls = []
+
+    def fake_record_gap(conn, scope, detail):
+        calls.append((scope, detail))
+
+    with patch("investment.jobs.apply_decision.record_gap", side_effect=fake_record_gap):
+        record_rejections(
+            None,
+            [("3993.T", ["stop_loss < entry_price < take_profit である必要があります"])],
+        )
+
+    assert len(calls) == 1
+    scope, detail = calls[0]
+    assert scope == "proposal_rejected:3993.T"
+    assert "stop_loss < entry_price < take_profit である必要があります" in detail
+
+
 # --- insert_proposals: 検証済みの判断が実際にDBへ保存されることの確認 ---
 
 TEST_URL = os.environ.get("DATABASE_URL_TEST")
@@ -241,3 +342,22 @@ def test_insert_proposals_saves_rule_version_from_context_not_hardcoded_v1(conn)
         cur.execute("SELECT rule_version FROM proposals")
         row = cur.fetchone()
     assert row["rule_version"] == "v2"
+
+
+@pytest.mark.integration
+def test_record_rejections_saves_to_data_gaps_table(conn):
+    # I5: 却下された提案は proposals には入れず(quantity<=0 等、この表の
+    # CHECK 制約に違反しうる値を持つ場合があるため)、data_gaps に却下理由の
+    # 全文を残す。journal には却下の経緯が文章で残るのに、DB側の記録が
+    # 存在しないと記録同士が食い違ってしまう。
+    from investment.jobs.apply_decision import record_rejections
+
+    record_rejections(conn, [("9999.T", ["エラーA", "エラーB"])])
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT scope, detail FROM data_gaps")
+        rows = cur.fetchall()
+    assert len(rows) == 1
+    assert rows[0]["scope"] == "proposal_rejected:9999.T"
+    assert "エラーA" in rows[0]["detail"]
+    assert "エラーB" in rows[0]["detail"]

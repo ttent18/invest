@@ -46,7 +46,13 @@ allowed-tools: Read, Write, WebSearch, WebFetch
   よって自動的に却下される。** 迷ったら `last_price` に近い値にする
 - `take_profit` は `entry_price × 1.22`、`stop_loss` は `entry_price × 0.92`
   で計算する
-- `quantity` は制約（資金の上限など）を超えない。超える値を書くと後段で却下される
+- `quantity` は制約（資金の上限など）を超えない。超える値を書くと後段で却下される。
+  **`quantity` は1以上の整数でなければならない**（0、負の数、端数は却下される）
+- **実際に効いている上限は `floor(総資金 × 1銘柄上限比率 ÷ entry_price)` である。**
+  例: 総資金550,000円、1銘柄上限比率15%、`entry_price` が2450円のとき、
+  `floor(550,000 × 0.15 ÷ 2450) = floor(33.67) = 33` 株が上限になる。
+  もう一方の上限（1取引の損失許容額 ÷ 1株あたりの想定損失）と比べて小さいほうが
+  採用されるため、これより多く書くと却下される
 - `can_open_new` が false なら買いの判断を出さない
 
 ## 売りの判断（action: "sell"）
@@ -54,11 +60,17 @@ allowed-tools: Read, Write, WebSearch, WebFetch
 - **売りは `positions`（現在の保有）にある銘柄しか出せない。** 保有していない
   銘柄を売る判断は後段で却下される
 - **売却する `quantity` は、その銘柄の保有株数を超えてはならない。** 超える値は
-  後段で却下される
+  後段で却下される。**`quantity` は1以上の整数でなければならない**
+  （0、負の数、端数は却下される）
 - `entry_price` / `take_profit` / `stop_loss` は売りの判断でも省略できない
   （`stop_loss < entry_price < take_profit` の並び順が検証されるため）。
   `positions` にある該当銘柄の `avg_price` / `take_profit` / `stop_loss` を
-  そのまま使うこと（買った時点で条件を満たすことが確認済みの値である）
+  そのまま使うこと（買った時点で条件を満たすことが確認済みの値である）。
+  **注意: これらの列名は買いの語彙のまま流用されている。** 売りの提案として
+  記録される `entry_price` は「売値」ではなく、実際には保有時点の買値
+  （`avg_price`）がそのまま入る。列の意味と実態が食い違っている既知の制約で、
+  Phase 1では実害が無い（`positions` を書き換えないため売りの提案自体が
+  データとして積み上がらない）が、将来 約定を記録する段階で見直される予定
 
 ## build/decision.json の形式
 
@@ -91,8 +103,10 @@ allowed-tools: Read, Write, WebSearch, WebFetch
 - `symbol` は買いなら `candidates`、売りなら `positions` にあるものだけを使う
 - `stop_loss < entry_price < take_profit` であること
 - 買いの `entry_price` は `last_price` の ±10% 以内であること
+- 買い・売りいずれも `quantity` は1以上の整数であること
 - 買いの `quantity` は制約の上限を超えないこと
 - 売りの `quantity` は保有株数を超えないこと
+- `rationale` / `scenario` は空文字（空白のみを含む）であってはならない
 - 見送る場合は `decisions` を空の配列にする
 
 ## journal/YYYY-MM-DD.md の形式

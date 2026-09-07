@@ -23,6 +23,28 @@ class Fundamentals:
     equity_ratio: float | None
 
 
+def has_no_data(f: Fundamentals) -> bool:
+    """5つの指標がすべて None かどうかを返す。
+
+    yfinance はレート制限などにあたっても例外を投げず、空の info（{}）を
+    静かに返すことがある。この場合 fetch_fundamentals は例外を出さず、
+    全項目が None の Fundamentals を返す。呼び出し側がこれを「取得成功」
+    と数えてしまうと、成功率100%のまま空の行が upsert され、
+    ON CONFLICT によって前回の（正常だった）データを上書きしてしまう。
+    一部の項目だけが None なのは正常な欠損（screen.evaluate 側が
+    「取得できません」として弾く設計）なので成功として扱ってよいが、
+    全項目が None の場合だけは「そもそも取得できていない」状態であり、
+    取得失敗として扱う必要がある。
+    """
+    return (
+        f.market_cap is None
+        and f.revenue_growth is None
+        and f.operating_margin is None
+        and f.roe is None
+        and f.equity_ratio is None
+    )
+
+
 def normalize_symbol(code: str) -> str:
     """銘柄コードを yfinance が受け取る形に整える。
 
@@ -143,4 +165,12 @@ def fetch_range(symbol: str, start: date, end: date) -> tuple[float, float]:
 
     if hist.empty:
         raise MarketDataError(f"{symbol} の {start}〜{end} のデータがありません")
-    return float(hist["High"].max()), float(hist["Low"].min())
+
+    # 兄弟の fetch_last_price は NaN をガードしているが、こちらは漏れていた。
+    # OHLC が NaN の行を例外なしで返すと、detect_hits の nan <= x / nan >= x は
+    # 常に False になり、約定の見落としが静かに起きる（例外もエラーも出ない）。
+    high = _as_float(hist["High"].max())
+    low = _as_float(hist["Low"].min())
+    if high is None or low is None:
+        raise MarketDataError(f"{symbol} の {start}〜{end} の値動きが不正です（NaN を含みます）")
+    return high, low

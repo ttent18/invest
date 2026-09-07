@@ -43,13 +43,23 @@ CREATE TABLE IF NOT EXISTS positions (
     opened_at     TIMESTAMPTZ    NOT NULL
 );
 
--- AIの提案。採否にかかわらず全件残す
+-- AIの提案のうち、検証に通って採用されたものだけを記録する。
+-- 却下された提案はここには入れない: quantity<=0 のように、この表の CHECK
+-- 制約に違反しうる値を持つ場合があり、そのまま insert すると失敗してバッチ
+-- 全体を道連れにしてしまうため。却下された提案は data_gaps に
+-- scope = 'proposal_rejected:<銘柄コード>' として、却下理由の全文を detail に
+-- 記録する（src/investment/jobs/apply_decision.py の record_rejections を参照）。
 CREATE TABLE IF NOT EXISTS proposals (
     id                BIGSERIAL      PRIMARY KEY,
     created_at        TIMESTAMPTZ    NOT NULL,
     symbol            TEXT           NOT NULL,
     action            TEXT           NOT NULL CHECK (action IN ('buy', 'sell')),
     quantity          INTEGER        NOT NULL CHECK (quantity > 0),
+    -- action='sell' の場合、entry_price/take_profit/stop_loss は「売値」ではなく
+    -- 保有時点の値(positions.avg_price/take_profit/stop_loss)をそのまま転記した
+    -- ものである。Phase 1 は positions を一切書き換えないため売りの提案が
+    -- 実際に行に積み上がることは無いが、列名と実態が食い違っている点に注意する
+    -- こと。約定を記録する計画2で、列の意味またはスキーマの見直しを検討する。
     entry_price       NUMERIC(18, 4) NOT NULL,
     take_profit       NUMERIC(18, 4) NOT NULL,
     stop_loss         NUMERIC(18, 4) NOT NULL,
