@@ -42,13 +42,23 @@ export async function loadState() {
     // JSONとして読めない場合は下の !res.ok / 汎用メッセージに任せる。
   }
 
+  // サーバーがエラーを返した場合（500など）。サーバーが返す message は
+  // 「いまの状態を読み込めませんでした」だけで、利用者が次に何をすれば
+  // よいかが分からない。通信失敗のほうには「電波を確かめて…」という
+  // 次の一手があるので、こちらにも足す。**画面が読めないときこそ、
+  // 本当の保有と注文はSBIのアプリで確かめてほしい**（この画面が黙って
+  // 古い内容を見せているのではないか、と疑えるようにするため）。
+  const NEXT_STEP =
+    "時間をおいて「もう一度読み込む」を押してください。" +
+    "それでも直らないときは、いまの保有と予約注文をSBIのアプリで確かめてください";
+
   if (!res.ok) {
-    const message = body && typeof body.message === "string" ? body.message : "いまの状態を読み込めませんでした";
-    throw new Error(message);
+    const detail = body && typeof body.message === "string" ? body.message : "いまの状態を読み込めませんでした";
+    throw new Error(`${detail}。${NEXT_STEP}`);
   }
 
   if (!body) {
-    throw new Error("いまの状態を読み込めませんでした");
+    throw new Error(`いまの状態を読み込めませんでした。${NEXT_STEP}`);
   }
 
   return body;
@@ -95,6 +105,49 @@ async function postJson(url, body) {
 // 二重送信よけの鍵を新しく作る。
 export function newClientKey() {
   return crypto.randomUUID();
+}
+
+// ---------------------------------------------------------------------------
+// 二重送信よけの鍵の置き場所
+//
+// 鍵をモーダル（入力欄）の中の変数だけに持たせると、
+// 「送信に失敗 → [やめる] → もう一度 [売った]」のときに新しい鍵になる。
+// サーバーには届いていたが応答だけが届かなかった場合、同じ売買が2行
+// 記録されてしまう（お金の記録が二重になる）。
+// そこで「どの売買か」を表す文字列（scope）をキーに sessionStorage へ
+// 退避し、同じ売買に対しては同じ鍵を使い回す。
+//
+// **記録に成功したら forgetClientKey() で必ず捨てること。**
+// 捨てないと、次に同じ銘柄を売買したときに同じ鍵が使われ、サーバーが
+// 「その鍵はもう記録済み」と判断して2回目の売買が記録されない。
+//
+// sessionStorage はプライベートブラウズなどで例外を投げることがある。
+// その場合は落とさずに、その場限りの新しい鍵を返す（＝これまでどおり
+// モーダルの中だけで鍵を持つ動きに戻る）。
+// ---------------------------------------------------------------------------
+
+const CLIENT_KEY_PREFIX = "fill-client-key:";
+
+// scope の例: "proposal:12:buy" / "position:7203.T:sell"
+export function clientKeyFor(scope) {
+  const storageKey = CLIENT_KEY_PREFIX + scope;
+  try {
+    const saved = window.sessionStorage.getItem(storageKey);
+    if (saved) return saved;
+    const created = newClientKey();
+    window.sessionStorage.setItem(storageKey, created);
+    return created;
+  } catch {
+    return newClientKey();
+  }
+}
+
+export function forgetClientKey(scope) {
+  try {
+    window.sessionStorage.removeItem(CLIENT_KEY_PREFIX + scope);
+  } catch {
+    // 使えないだけなので、何もしないで進む。
+  }
 }
 
 // POST /api/fills — 「買った」「売った」を記録する。
@@ -199,20 +252,46 @@ export function pct(n) {
   return `${sign}${value.toFixed(1)}%`;
 }
 
-// "2026-09-08T07:02:00Z" → "9月8日 7:02"
+// "2026-09-07T23:02:00Z" → "9月8日 8:02"
 //
-// 意図的に、閲覧しているブラウザのタイムゾーンには変換しない
-// （UTCの構成要素をそのまま「月/日 時:分」として使う）。iPhone側の
-// タイムゾーン設定によって表示がずれないようにするため。
+// iPhone のタイムゾーン設定に関係なく、**常に日本時間（Asia/Tokyo）で
+// 出す**。データベースの時刻はすべてUTCで入っている（last_price_at や
+// created_at は NOW()）ので、日本時間に直してから見せる必要がある。
+//
+// サーバー側も日本時間で数えている（functions/_shared/state.js の
+// jstDayNumber が「何日前の提案か」を日本時間のカレンダー上の日付で
+// 数える）。ここを日本時間にしておくことで、同じカードの中の
+// 「今日の提案」と「提案が出たのは ◯月◯日 ◯:◯◯」が食い違わない。
+//
+// （以前はUTCの構成要素をそのまま使っていたため、表示が常に日本時間の
+//  9時間前になり、朝8時台に保存された株価が「前日の23時台」として
+//  出ていた。）
+//
+// hourCycle: "h23" を明示するのは、環境によって深夜0時が "24:00" と
+// 出ることがあるため（0〜23 に固定する）。
+const JST_TIME_FORMAT = new Intl.DateTimeFormat("ja-JP", {
+  timeZone: "Asia/Tokyo",
+  month: "numeric",
+  day: "numeric",
+  hour: "2-digit",
+  minute: "2-digit",
+  hourCycle: "h23",
+});
+
 export function whenText(iso) {
   if (!iso) return "—";
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "—";
-  const month = d.getUTCMonth() + 1;
-  const date = d.getUTCDate();
-  const hours = d.getUTCHours();
-  const minutes = String(d.getUTCMinutes()).padStart(2, "0");
-  return `${month}月${date}日 ${hours}:${minutes}`;
+  const parts = JST_TIME_FORMAT.formatToParts(d);
+  const part = (type) => parts.find((p) => p.type === type)?.value ?? "";
+  const month = Number(part("month"));
+  const day = Number(part("day"));
+  const hour = Number(part("hour"));
+  const minute = part("minute");
+  if (!Number.isFinite(month) || !Number.isFinite(day) || !Number.isFinite(hour) || !minute) {
+    return "—";
+  }
+  return `${month}月${day}日 ${hour}:${minute}`;
 }
 
 // <input type="datetime-local"> の初期値用（ブラウザのローカル時刻表記）。
@@ -248,6 +327,47 @@ export function banner(kind, text) {
   el.className = `banner banner-${kind === "danger" ? "danger" : "info"}`;
   el.textContent = text;
   return el;
+}
+
+// 「反映できていない記録」の帯。**3つの画面すべてで出すこと。**
+//
+// [買った]／[売った]を記録しても、保有と現金に反映されるのは
+// GitHub Actions の次回実行のとき。それまでは画面を読み込み直しても
+// 保有はそのまま残り、ボタンも押せる状態のままになる。この帯が無いと、
+// 利用者は「記録できたのか分からない」まま同じ売買をもう一度記録して
+// しまう（お金の記録が二重になる）。
+//
+// root: 帯を差し込む要素（各画面の banner-root）。
+// fills: /api/state の unapplied_fills（applied_at が NULL の記録）。
+export function renderUnappliedBanner(root, fills) {
+  if (!root) return;
+  if (!Array.isArray(fills) || fills.length === 0) return;
+
+  const wrap = document.createElement("div");
+  wrap.className = "banner banner-danger";
+
+  const title = document.createElement("div");
+  title.textContent = `まだ反映できていない記録が${fills.length}件あります`;
+  wrap.appendChild(title);
+
+  const list = document.createElement("ul");
+  list.className = "unapplied-list";
+  for (const f of fills) {
+    const li = document.createElement("li");
+    const sideText = f.side === "sell" ? "売り" : "買い";
+    const reason = f.apply_error || "まだ反映されていません（次の自動処理を待っています）";
+    li.textContent = `${f.symbol}（${sideText}） … ${reason}`;
+    list.appendChild(li);
+  }
+  wrap.appendChild(list);
+
+  const note = document.createElement("div");
+  note.className = "unapplied-note";
+  note.textContent =
+    "反映されるまで、保有と収支の表示は変わりません。記録はもう届いているので、同じ売買をもう一度記録しないでください。";
+  wrap.appendChild(note);
+
+  root.appendChild(wrap);
 }
 
 // ---------------------------------------------------------------------------
@@ -327,6 +447,17 @@ export function distancePct(fromPrice, toPrice) {
     return null;
   }
   return (toPrice - fromPrice) / fromPrice;
+}
+
+// 日本株（銘柄コードが ".T" で終わる）かどうか。
+//
+// **functions/_shared/validate.js の isJapaneseStock（15〜17行目）と
+// 同じ判定にすること。** サーバー側は日本株にだけ「100株単位」を
+// 課す（validate.js の 53行目）ので、画面の案内もそれに合わせて
+// 出し分ける。無条件に「100株単位で入れてください」と書くと、
+// 米国株を売るときに嘘の案内になる。
+export function isJapaneseStock(symbol) {
+  return typeof symbol === "string" && symbol.toUpperCase().endsWith(".T");
 }
 
 // 回転枠の「期限」表示に使う business_days_held / days_left は、

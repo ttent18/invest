@@ -48,6 +48,9 @@
         escapeHtml,
         banner,
         renderNav,
+        renderUnappliedBanner,
+        clientKeyFor,
+        forgetClientKey,
       } from "/app.js";
 
       // ---------------------------------------------------------------
@@ -219,8 +222,13 @@
         document.getElementById("modal-root").innerHTML = "";
         const isBuy = proposal.action === "buy";
         const now = new Date();
-        // 送信が失敗して再送するとき、同じ鍵を使い回す（二重記録を防ぐため）。
-        let clientKey = null;
+        // 二重送信よけの鍵。**この提案に対する鍵は sessionStorage に
+        // 退避してあり、モーダルを閉じて開き直しても同じ鍵になる**
+        // （app.js の clientKeyFor を参照）。閉じるたびに新しい鍵に
+        // なると、「サーバーには届いたが応答が返らなかった」場合に
+        // 同じ売買が2行記録される。記録できたら forgetClientKey で捨てる。
+        const keyScope = `proposal:${proposal.id}:${proposal.action}`;
+        let clientKey = clientKeyFor(keyScope);
 
         const overlay = document.createElement("div");
         overlay.className = "modal-overlay";
@@ -249,8 +257,16 @@
                 value="${isBuy && proposal.entry_price != null ? proposal.entry_price : ""}">
               <p class="hint-text">SBIで実際に約定した値段をそのまま入れてください（提案の値段とずれていて構いません）。</p>
               ${
+                // 売りの take_profit / stop_loss は、保有していたときの値の
+                // 転記（migrations/001_initial.sql）。「目安」とだけ書くと
+                // これから出す注文の値段に見えるので、過去に決めた値だと
+                // はっきり書く。
                 !isBuy
-                  ? `<p class="hint-text">参考：利確の目安 ${yen(proposal.take_profit)} ／ 損切りの目安 ${yen(proposal.stop_loss)}</p>`
+                  ? `<p class="hint-text">参考：買ったときに決めていた値段（利確 ${yen(
+                      proposal.take_profit
+                    )} ／ 損切り ${yen(
+                      proposal.stop_loss
+                    )}）。いま出す注文の値段ではありません。</p>`
                   : ""
               }
             </div>
@@ -345,6 +361,10 @@
             return;
           }
 
+          // 記録できたので、この売買の鍵は捨てる（次に同じ提案・同じ
+          // 銘柄を売買したときに使い回さないため）。
+          forgetClientKey(keyScope);
+
           closeModal();
           showTransientMessage(
             result.created ? "記録しました" : "この売買は記録済みです",
@@ -413,28 +433,75 @@
       // 一覧の描画
       // ---------------------------------------------------------------
 
-      function renderUnappliedBanner(root, fills) {
-        if (!Array.isArray(fills) || fills.length === 0) return;
-        const wrap = document.createElement("div");
-        wrap.className = "banner banner-danger";
-        const title = document.createElement("div");
-        title.textContent = `反映できていない記録が${fills.length}件あります`;
-        wrap.appendChild(title);
-        const list = document.createElement("ul");
-        list.className = "unapplied-list";
+      // 「反映できていない記録」の帯は3つの画面で共通なので app.js にある。
+
+      // 記録済み（まだ反映されていない）提案かどうかを引くための鍵の集合を作る。
+      //
+      // [買った]／[売った]を記録しても、提案の outcome が変わるのは
+      // 反映が走ったあと。それまで /api/state は同じ提案を pending の
+      // まま返すので、何もしないと「記録したのに、まだボタン付きの
+      // カードが出ている」状態になり、もう一度記録してしまう。
+      // unapplied_fills（未反映の記録）と銘柄・売買の向きで突き合わせる。
+      function recordedKeys(fills) {
+        const keys = new Set();
+        if (!Array.isArray(fills)) return keys;
         for (const f of fills) {
-          const li = document.createElement("li");
-          const sideText = f.side === "sell" ? "売り" : "買い";
-          const reason = f.apply_error || "まだ反映されていません（次の処理を待っています）";
-          li.textContent = `${f.symbol}（${sideText}） … ${reason}`;
-          list.appendChild(li);
+          if (f && typeof f.symbol === "string" && typeof f.side === "string") {
+            keys.add(`${f.symbol}:${f.side}`);
+          }
         }
-        wrap.appendChild(list);
-        root.appendChild(wrap);
+        return keys;
       }
 
-      function renderProposalCard(p) {
+      // 売りの提案カードの、いちばん目立つ枠。
+      //
+      // **買いの提案の stop_loss は「これからSBIに入れる予約注文の値段」
+      // だが、売りの提案の stop_loss は違う。** 保有していたときの値の
+      // 転記であって、これから出す注文の指示ではない
+      // （migrations/001_initial.sql の proposals の列コメント参照）。
+      // 買いと同じ「損切りライン（…SBIで入れます）」を出すと、
+      // 「売れ」と言っているカードの一番大きい文字が「予約注文を入れろ」
+      // と読めてしまい、売らずに注文だけ置く／売ったうえに注文を残す、
+      // のどちらかが起きる。どちらもお金が動く。
+      //
+      // そこで売りのカードでは、この枠を「いま売る」＋「置いてある
+      // 予約注文はもう不要なので取り消す」という、次にやることの案内に
+      // 差し替える。見た目は買いの赤枠より控えめ（黄色）にして、
+      // **買いの損切りの赤枠がこの画面でいちばん目立つ**状態を保つ。
+      function renderSellActionBlock(p) {
+        const block = document.createElement("div");
+        block.className = "sell-action-block";
+        block.innerHTML = `
+          <div class="sell-action-label">SBIで売り注文を出してください</div>
+          <div class="sell-action-body">
+            この銘柄を買ったときにSBIへ置いた予約注文（${yen(
+              p.stop_loss
+            )}まで値下がりしたら自動で売る注文。SBIでは「逆指値」と呼びます）は、
+            <strong>もう不要です。売れたら、SBIでその予約注文を取り消してください。</strong><br>
+            取り消さないと、持っていない株を売る注文がSBIに残ったままになります。
+          </div>
+        `;
+        return block;
+      }
+
+      // 買いの提案カードの、いちばん目立つ枠。
+      // **この赤枠がこの画面の唯一の安全装置。控えめにしないこと。**
+      function renderStopLossBlock(p) {
+        const block = document.createElement("div");
+        block.className = "stop-loss-block";
+        block.innerHTML = `
+          <div class="stop-loss-label">
+            損切りライン（この値段まで下がったら自動で売る予約注文を、SBIで入れます）
+          </div>
+          <div class="stop-loss-value">${yen(p.stop_loss)}</div>
+        `;
+        return block;
+      }
+
+      // recorded: recordedKeys() が返す Set。
+      function renderProposalCard(p, recorded) {
         const isBuy = p.action === "buy";
+        const isRecorded = recorded instanceof Set && recorded.has(`${p.symbol}:${p.action}`);
         const card = document.createElement("div");
         card.className = "card";
 
@@ -454,15 +521,15 @@
         `;
         card.appendChild(head);
 
-        const stopBlock = document.createElement("div");
-        stopBlock.className = "stop-loss-block";
-        stopBlock.innerHTML = `
-          <div class="stop-loss-label">
-            損切りライン（この値段まで下がったら自動で売る予約注文を、SBIで入れます）
-          </div>
-          <div class="stop-loss-value">${yen(p.stop_loss)}</div>
-        `;
-        card.appendChild(stopBlock);
+        if (isRecorded) {
+          const recordedNote = document.createElement("div");
+          recordedNote.className = "recorded-badge";
+          recordedNote.textContent =
+            "記録済み（反映待ち）。この売買はもう届いています。次の自動処理でこのカードは消えます。もう一度記録しないでください。";
+          card.appendChild(recordedNote);
+        }
+
+        card.appendChild(isBuy ? renderStopLossBlock(p) : renderSellActionBlock(p));
 
         const figures = document.createElement("div");
         figures.className = "proposal-figures";
@@ -478,14 +545,20 @@
             </div>
           `;
         } else {
+          // 売りの take_profit も stop_loss と同じで、保有していたときの
+          // 値の転記（migrations/001_initial.sql）。「この値段になったら
+          // 売る目安」として出すと、いま売れと言っているのに
+          // 「その値段まで待て」と読めてしまうので、過去に決めた値だと
+          // 分かる書き方にする。
           figures.innerHTML = `
             <div class="figure">
-              <div class="figure-label">株数</div>
+              <div class="figure-label">売る株数</div>
               <div class="figure-value">${p.quantity === null || p.quantity === undefined ? "—" : `${p.quantity}株`}</div>
             </div>
             <div class="figure">
-              <div class="figure-label">利確ライン（値上がりしてこの値段になったら売る目安）</div>
-              <div class="figure-value figure-value-profit">${yen(p.take_profit)}</div>
+              <div class="figure-label">参考：買ったときに決めていた利確の目安</div>
+              <div class="figure-value">${yen(p.take_profit)}</div>
+              <div class="figure-hint">いま出す注文の値段ではありません</div>
             </div>
           `;
         }
@@ -519,6 +592,13 @@
         skipBtn.className = "btn btn-secondary";
         skipBtn.textContent = "見送る";
         skipBtn.addEventListener("click", () => openSkipModal(p));
+
+        // すでに記録した（まだ反映されていない）提案は、もう一度
+        // 記録できないようにする。二重に記録されるとお金の記録が狂う。
+        if (isRecorded) {
+          fillBtn.disabled = true;
+          skipBtn.disabled = true;
+        }
 
         actions.appendChild(fillBtn);
         actions.appendChild(skipBtn);
@@ -622,9 +702,10 @@
           empty.textContent = "いま未実行の提案はありません。";
           main.appendChild(empty);
         } else {
+          const recorded = recordedKeys(state.unapplied_fills);
           for (const p of proposals) {
             try {
-              main.appendChild(renderProposalCard(p));
+              main.appendChild(renderProposalCard(p, recorded));
             } catch (err) {
               console.error("提案カードの表示に失敗しました", err);
               const bad = document.createElement("div");
@@ -674,6 +755,11 @@
           const state = await loadState();
           renderMain(state);
         } catch (err) {
+          // 読み込みに失敗したときも banner-root を空にする。
+          // 消さないと、前回の「反映できていない記録が◯件あります」が
+          // 残ったままになり、いま読めていない状態の情報として
+          // 読まれてしまう（古い件数を今の件数と勘違いする）。
+          document.getElementById("banner-root").innerHTML = "";
           main.innerHTML = "";
           main.appendChild(banner("danger", err.message || "いまの状態を読み込めませんでした"));
           const retryBtn = document.createElement("button");
