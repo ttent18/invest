@@ -55,6 +55,10 @@ allowed-tools: Read, Write, WebSearch, WebFetch
   銘柄を売る判断は後段で却下される
 - **売却する `quantity` は、その銘柄の保有株数を超えてはならない。** 超える値は
   後段で却下される
+- `entry_price` / `take_profit` / `stop_loss` は売りの判断でも省略できない
+  （`stop_loss < entry_price < take_profit` の並び順が検証されるため）。
+  `positions` にある該当銘柄の `avg_price` / `take_profit` / `stop_loss` を
+  そのまま使うこと（買った時点で条件を満たすことが確認済みの値である）
 
 ## build/decision.json の形式
 
