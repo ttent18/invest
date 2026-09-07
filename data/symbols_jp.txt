@@ -1,4 +1,4 @@
-# 生成日時: 2026-09-07T19:49:19.575055+09:00
+# 生成日時: 2026-09-07T19:58:00.939791+09:00
 # 出所: https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.xlsx
 # 元データの日付: 20260831
 # 件数: 3700

@@ -97,9 +97,23 @@ def extract_domestic_codes(df: pd.DataFrame) -> list[str]:
     受け取る形にしてある。ダウンロード処理そのもの (download()) はここでは
     テストしない。
     """
+    kept, _ = split_domestic_codes(df)
+    return kept
+
+
+def split_domestic_codes(df: pd.DataFrame) -> tuple[list[str], list[str]]:
+    """内国株式3市場のコードを (残すもの, 除外したもの) に分けて返す。
+
+    除外したものも返すのは、黙って捨てないため。JPX 側のファイル形式が
+    変わってコードの見え方が変わった場合（例: 1301 が "1301.0" と読まれる）、
+    母集団が気づかないうちに減ってしまう。再生成時に件数を表示して
+    気づけるようにする。
+    """
     filtered = df[df[MARKET_COLUMN].isin(INCLUDED_MARKET_SEGMENTS)]
     codes = [_format_code(v) for v in filtered[CODE_COLUMN].tolist()]
-    return [c for c in codes if len(c) == COMMON_STOCK_CODE_LENGTH]
+    kept = [c for c in codes if len(c) == COMMON_STOCK_CODE_LENGTH]
+    excluded = [c for c in codes if len(c) != COMMON_STOCK_CODE_LENGTH]
+    return kept, excluded
 
 
 def build_symbols_file(df: pd.DataFrame, source_date: str, generated_at: datetime) -> str:
@@ -133,10 +147,15 @@ def main() -> int:
     generated_at = datetime.now(tz=JST)
 
     text = build_symbols_file(df, source_date, generated_at)
-    codes = extract_domestic_codes(df)
+    codes, excluded = split_domestic_codes(df)
 
     OUTPUT.write_text(text, encoding="utf-8")
     print(f"{len(codes)} 銘柄を {OUTPUT} に書き出しました（元データの日付: {source_date}）")
+    if excluded:
+        print(
+            f"4文字でないコード {len(excluded)} 件を除外しました"
+            f"（優先株式・種類株式）: {', '.join(excluded)}"
+        )
     return 0
 
 

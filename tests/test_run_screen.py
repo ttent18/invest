@@ -55,6 +55,7 @@ def test_fetch_all_never_touches_the_database():
 
     with (
         patch("investment.jobs.run_screen.fetch_fundamentals", side_effect=fake_fetch),
+        patch("investment.jobs.run_screen.connect", side_effect=boom),
         patch("investment.jobs.run_screen.record_gaps", side_effect=boom),
         patch("investment.jobs.run_screen.upsert_fundamentals", side_effect=boom),
     ):
@@ -62,6 +63,7 @@ def test_fetch_all_never_touches_the_database():
 
     assert result.ok == 2
     assert result.failed == 1
+    assert [f.symbol for f in result.fetched] == ["1111.T", "2222.T"]
     assert [scope for scope, _ in result.gaps] == ["fundamentals:9999"]
 
 
@@ -178,6 +180,7 @@ def test_persist_skips_write_and_records_gap_when_success_rate_below_threshold()
 
 def test_persist_writes_at_exactly_threshold_boundary():
     """成功率がちょうど閾値のときは書き込む（境界は「以上」）。"""
+    assert SUCCESS_RATE_THRESHOLD == 0.9  # 閾値が黙って変わっていないこと
     total = 10
     ok = int(total * SUCCESS_RATE_THRESHOLD)  # 9
     res = FetchResult(
@@ -193,3 +196,21 @@ def test_persist_writes_at_exactly_threshold_boundary():
 
     assert written is True
     upsert.assert_called_once()
+
+
+def test_persist_records_nothing_extra_when_every_symbol_succeeded():
+    """全件取得できた日は、data_gaps に余計な行を作らないこと。
+
+    週次バッチが最もよく通る経路なので、明示的に押さえておく。
+    """
+    res = FetchResult(fetched=[_ok(str(1000 + i)) for i in range(10)], gaps=[])
+
+    with (
+        patch("investment.jobs.run_screen.upsert_fundamentals") as upsert,
+        patch("investment.jobs.run_screen.record_gaps") as gaps,
+    ):
+        written = persist(conn=None, result=res, as_of=date(2026, 9, 7))
+
+    assert written is True
+    upsert.assert_called_once()
+    gaps.assert_not_called()

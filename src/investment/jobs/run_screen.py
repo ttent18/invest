@@ -138,7 +138,10 @@ def persist(conn, result: FetchResult, as_of: date) -> bool:
 
 def main() -> int:
     symbols = load_symbols(SYMBOLS_JP)
-    print(f"{len(symbols)} 銘柄のファンダメンタルズを取得します")
+    # 「いつのデータか」は取得を始めた時点で決める。取得に1時間近くかかるため、
+    # 終わってから日付を取ると、日付をまたいだときに翌日のデータとして記録される。
+    as_of = datetime.now(tz=JST).date()
+    print(f"{len(symbols)} 銘柄のファンダメンタルズを取得します（{as_of} 時点）")
     started = time.time()
 
     # 取得を先に終わらせる。ここではまだデータベースに接続しない
@@ -149,7 +152,7 @@ def main() -> int:
 
     print("データベースに保存します")
     with connect() as conn:
-        written = persist(conn, result, datetime.now(tz=JST).date())
+        written = persist(conn, result, as_of)
 
     if written:
         print("保存しました")

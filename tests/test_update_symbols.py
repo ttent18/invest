@@ -12,6 +12,7 @@ from update_symbols import (
     MARKET_COLUMN,
     build_symbols_file,
     extract_domestic_codes,
+    split_domestic_codes,
 )
 
 from investment.jobs.run_screen import load_symbols
@@ -144,3 +145,21 @@ def test_extract_domestic_codes_excludes_five_character_preferred_shares():
         ]
     )
     assert extract_domestic_codes(df) == ["1301"]
+
+
+def test_split_domestic_codes_reports_what_it_excluded():
+    """除外したコードを黙って捨てず、呼び出し側に返すこと。
+
+    JPX 側のファイル形式が変わって母集団が減ったときに気づけるようにする。
+    """
+    df = _df(
+        [
+            _row(25935, "プライム（内国株式）"),
+            _row(1301, "プライム（内国株式）"),
+            _row(1305, "ETF・ETN"),
+        ]
+    )
+    kept, excluded = split_domestic_codes(df)
+
+    assert kept == ["1301"]
+    assert excluded == ["25935"]  # 市場区分で除いたETFはここには入らない
