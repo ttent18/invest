@@ -74,8 +74,29 @@ jobs:
         # コミットまで飛ばしてしまうと、AIの調査結果そのものが失われてしまう。
         if: always()
         run: |
+          set -euo pipefail
           git config user.name "investment-bot"
           git config user.email "noreply@example.com"
           git add journal/
-          git diff --staged --quiet || git commit -m "chore: $(date +%F) の判断を記録"
-          git push
+          if git diff --staged --quiet; then
+            echo "journal に変更がないため、コミットしません"
+            exit 0
+          fi
+          git commit -m "chore: $(date +%F) の判断を記録"
+
+          # この実行の間に main が進んでいると push は必ず弾かれる。
+          # 弾かれたまま終わると、AIが書いた日誌はランナーごと消える
+          # （2026-09-07 に実際に失われた: 311行の調査記録がまるごと消滅）。
+          # リモートの変更を取り込み直してから押し直す。
+          # journal/ は日付ごとの別ファイルで、この処理以外は誰も触らないため、
+          # rebase で内容がぶつかることは実質起こらない。
+          for attempt in 1 2 3; do
+            if git pull --rebase origin main && git push origin HEAD:main; then
+              echo "journal を push しました（試行 ${attempt} 回目）"
+              exit 0
+            fi
+            echo "push が弾かれました。取り込み直して再試行します（${attempt}/3）"
+            sleep 5
+          done
+          echo "3回試しても push できませんでした" >&2
+          exit 1
