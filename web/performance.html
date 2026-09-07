@@ -198,6 +198,24 @@
           ],
           ["損益トントン", (p) => (p ? ratePct(p.breakeven_win_rate) : "—")],
           ["平均保有日数", (p) => (p && p.avg_holding_days !== null ? `${p.avg_holding_days.toFixed(1)}日` : "—")],
+          // rules/v3.md「次に見直すタイミング: 各枠の決着が15件ずつ溜まった
+          // とき。そこで勝率・平均保有日数・期限切れの件数を比較する」の
+          // 3つ目。/api/state が expired_count として返す
+          // （functions/_shared/state.js）ので、ここでは数え直さない。
+          //
+          // **期限の無いじっくり枠は null で来る。0 と出さないこと。**
+          // 0 は「期限切れが一度も無かった」という事実だが、じっくり枠には
+          // そもそも期限が無い（rules/v3.md の表）ので、0 と書くと嘘になる。
+          [
+            "期限で降りた数",
+            (p) => {
+              if (!p) return "—";
+              if (p.expired_count === null || p.expired_count === undefined) {
+                return '—<div class="perf-cell-note">この枠には<br>期限がありません</div>';
+              }
+              return `${p.expired_count}件`;
+            },
+          ],
           ["合計損益", (p) => (p ? yen(p.total_pnl) : "—")],
         ];
 
@@ -213,6 +231,18 @@
           table.appendChild(tr);
         }
         card.appendChild(table);
+
+        // 「期限で降りた数」がどうやって出した数字かを、利用者にも書く。
+        // これは「なぜ売ったか」の記録ではなく、保有日数からの導出なので、
+        // 実際より多めに出る。黙って出すと、期限のせいで降りた回数として
+        // 読まれてしまう。
+        const noteExpired = document.createElement("p");
+        noteExpired.className = "hint-text";
+        noteExpired.textContent =
+          "「期限で降りた数」は、決着した取引のうち、保有日数が期限に届いていたものを数えたものです。" +
+          "利確や損切りで降りた日がたまたま期限の日だった取引も、ここでは期限切れに数えます（実際より多めに出ます）。" +
+          "「じっくり枠」には期限がないので「—」です。";
+        card.appendChild(noteExpired);
 
         const noteRotation = document.createElement("p");
         noteRotation.className = "hint-text";

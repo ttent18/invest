@@ -45,12 +45,17 @@
         pct,
         whenText,
         toDatetimeLocalValue,
+        jstLocalToIso,
         escapeHtml,
         banner,
         renderNav,
         renderUnappliedBanner,
         clientKeyFor,
         forgetClientKey,
+        isJapaneseStock,
+        indexUnappliedFills,
+        recordedFillForProposal,
+        failedFillForProposal,
       } from "/app.js";
 
       // ---------------------------------------------------------------
@@ -205,6 +210,49 @@
         }, 4500);
       }
 
+      // 勝手に消えないお知らせ。**次にやることが残っているとき**に使う。
+      // 4.5秒で消える showTransientMessage では、「SBIの予約注文を置き
+      // 直してください」のような、読んで動く必要のある案内が読み終わる前に
+      // 消えてしまう。閉じるのは利用者に決めさせる。
+      //
+      // lines: 段落にする文字列の配列。
+      // link: { href, label } を渡すと、末尾にその画面へのリンクを出す。
+      function showStickyMessage(lines, kind, link) {
+        const root = document.getElementById("toast-root");
+        root.innerHTML = "";
+        const el = document.createElement("div");
+        el.className = `banner banner-${kind === "danger" ? "danger" : "info"}`;
+        el.style.position = "fixed";
+        el.style.left = "16px";
+        el.style.right = "16px";
+        el.style.bottom = "calc(16px + env(safe-area-inset-bottom))";
+        el.style.zIndex = "100";
+        el.style.maxHeight = "70vh";
+        el.style.overflowY = "auto";
+
+        for (const line of lines) {
+          const p = document.createElement("p");
+          p.textContent = line;
+          el.appendChild(p);
+        }
+
+        if (link) {
+          const a = document.createElement("a");
+          a.href = link.href;
+          a.textContent = link.label;
+          a.className = "sticky-link";
+          el.appendChild(a);
+        }
+
+        const close = document.createElement("button");
+        close.className = "btn btn-secondary btn-block";
+        close.textContent = "閉じる";
+        close.addEventListener("click", () => el.remove());
+        el.appendChild(close);
+
+        root.appendChild(el);
+      }
+
       // ---------------------------------------------------------------
       // モーダルの開閉
       // ---------------------------------------------------------------
@@ -230,6 +278,28 @@
         const keyScope = `proposal:${proposal.id}:${proposal.action}`;
         let clientKey = clientKeyFor(keyScope);
 
+        // 会社名。取れていない銘柄では出さないだけにする（この1件のせいで
+        // 入力欄そのものが出せなくなってはいけない）。
+        const nameText = typeof proposal.name === "string" && proposal.name.trim() !== "" ? proposal.name : null;
+
+        // 100株単位は日本株（銘柄コードが .T で終わるもの）だけの決まり。
+        // サーバー側の functions/_shared/validate.js も日本株にだけ
+        // この確認をしている。米国株にまで「100株単位」と案内すると嘘になる。
+        // **保有画面の [売った]（holdings.html）と同じ案内にすること。**
+        // 同じ「売る」で言うことが食い違うと、どちらが本当か分からなくなる。
+        const isJp = isJapaneseStock(proposal.symbol);
+        const unit = isJp ? 100 : 1;
+        const unitHint = isJp
+          ? "100株単位で入れてください（日本株は100株ずつしか売買できません）。"
+          : "1株から売れます（この銘柄は日本株ではないので、100株単位の決まりはありません）。";
+
+        // 提案の買値。これと違う値段で買うと、システムが持つ損切りの値段が
+        // 実際に買った値段から計算し直され、SBIに置いた予約注文とずれる。
+        const proposedPrice =
+          isBuy && typeof proposal.entry_price === "number" && Number.isFinite(proposal.entry_price)
+            ? proposal.entry_price
+            : null;
+
         const overlay = document.createElement("div");
         overlay.className = "modal-overlay";
         overlay.innerHTML = `
@@ -240,6 +310,7 @@
             <div class="form-row">
               <label>銘柄コード</label>
               <div class="form-row-static">${escapeHtml(proposal.symbol)}</div>
+              ${nameText ? `<p class="hint-text">${escapeHtml(nameText)}</p>` : ""}
             </div>
             <div class="form-row">
               <label>枠</label>
@@ -247,15 +318,29 @@
             </div>
             <div class="form-row">
               <label>株数</label>
-              <input type="number" inputmode="numeric" id="fm-quantity" min="1" step="1"
+              <input type="number" inputmode="numeric" id="fm-quantity"
+                min="${isBuy ? 1 : unit}" step="${isBuy ? 1 : unit}"
                 value="${proposal.quantity ?? ""}">
+              ${isBuy ? "" : `<p class="hint-text">${unitHint}</p>`}
             </div>
+            ${
+              isBuy
+                ? ""
+                : `<div class="warn-box" id="fm-partial-warn" hidden>
+              提案の株数より少なく売ると、SBIに置いた予約注文の株数が実際の保有と合わなくなります。<br>
+              売ったあとに予約注文を置き直してください。
+            </div>`
+            }
             <div class="form-row">
               <label>${isBuy ? "買った値段（1株あたり）" : "売った値段（1株あたり）"}</label>
               <input type="number" inputmode="decimal" id="fm-price" min="0" step="0.01"
                 placeholder="${isBuy ? "" : "例：950"}"
                 value="${isBuy && proposal.entry_price != null ? proposal.entry_price : ""}">
-              <p class="hint-text">SBIで実際に約定した値段をそのまま入れてください（提案の値段とずれていて構いません）。</p>
+              <p class="hint-text">${
+                isBuy
+                  ? "SBIで実際に約定した値段をそのまま入れてください。提案の値段と違ってもかまいませんが、その場合はSBIに置いた予約注文も置き直す必要があります（下に案内が出ます）。"
+                  : "SBIで実際に約定した値段をそのまま入れてください（提案の値段とずれていて構いません）。"
+              }</p>
               ${
                 // 売りの take_profit / stop_loss は、保有していたときの値の
                 // 転記（migrations/001_initial.sql）。「目安」とだけ書くと
@@ -270,8 +355,34 @@
                   : ""
               }
             </div>
+            ${
+              // 【この画面でいちばん危ないところ】
+              // 提案と違う値段で買うと、システムは実際に買った値段から
+              // 損切りの値段を計算し直す（src/investment/fills.py の
+              // _exits）。ところがSBIに置いた予約注文は、提案のカードを
+              // 見て置いた値段のまま誰も直さない。放っておくと、
+              // 値下がりしたときの損がルールで決めた幅より大きくなる。
+              //
+              // **画面では損切りの値段を計算し直さない。**（同じ式が
+              // Python・API・画面の三重管理になり、片方だけ直したときに
+              // 気づけなくなる。）代わりに「ずれたこと」と「次に何を
+              // すればよいか」だけを伝える。
+              isBuy
+                ? `<div class="warn-box" id="fm-price-warn" hidden>
+              <strong>提案の値段（${yen(proposedPrice)}）と違います。</strong><br>
+              このまま記録すると、損切りの値段は提案のカードの ${yen(
+                proposal.stop_loss
+              )} ではなく、いま入れた値段をもとに計算し直されます。
+              SBIに置いた予約注文は ${yen(
+                proposal.stop_loss
+              )} のままなので、置き直さないとルールで決めた損切りとずれたままになります
+              （提案より高く買っているほど、実際の損は決めた幅より大きくなります）。<br>
+              <strong>記録したあと、この記録が反映されたら「保有」の画面を開き、そこに出ている損切りの値段を見て、SBIの予約注文をその値段に置き直してください。</strong>
+            </div>`
+                : ""
+            }
             <div class="form-row">
-              <label>売買した日時</label>
+              <label>売買した日時（日本時間）</label>
               <input type="datetime-local" id="fm-traded-at" value="${toDatetimeLocalValue(now)}">
             </div>
             <div class="form-row">
@@ -308,6 +419,46 @@
         const cancelBtn = overlay.querySelector("#fm-cancel");
         const errorEl = overlay.querySelector("#fm-error");
         const checkbox = overlay.querySelector("#fm-confirm");
+        const quantityInput = overlay.querySelector("#fm-quantity");
+        const priceInput = overlay.querySelector("#fm-price");
+        const priceWarn = overlay.querySelector("#fm-price-warn");
+        const partialWarn = overlay.querySelector("#fm-partial-warn");
+
+        // 提案の値段と違う値段を入れている間だけ、警告を出す
+        // （入れ直して提案と同じ値段に戻したら消える）。
+        const priceDiffers = () => {
+          if (proposedPrice === null) return false;
+          const raw = priceInput.value;
+          if (raw === "") return false;
+          const value = Number(raw);
+          if (!Number.isFinite(value)) return false;
+          return Math.abs(value - proposedPrice) > 1e-9;
+        };
+        const updatePriceWarn = () => {
+          if (!priceWarn) return;
+          priceWarn.hidden = !priceDiffers();
+        };
+        if (priceWarn) {
+          priceInput.addEventListener("input", updatePriceWarn);
+          updatePriceWarn();
+        }
+
+        // 売りのとき、提案より少ない株数を入れている間だけ出す警告。
+        // （保有画面の [売った] と同じ案内。）
+        if (partialWarn) {
+          const fullQuantity = Number(proposal.quantity);
+          const updatePartialWarn = () => {
+            const q = Number(quantityInput.value);
+            partialWarn.hidden = !(
+              Number.isFinite(q) &&
+              q > 0 &&
+              Number.isFinite(fullQuantity) &&
+              q < fullQuantity
+            );
+          };
+          quantityInput.addEventListener("input", updatePartialWarn);
+          updatePartialWarn();
+        }
 
         if (isBuy) {
           // 確認チェックを入れるまで、確定ボタンを押せないようにする。
@@ -329,16 +480,15 @@
           submitBtn.disabled = true;
           cancelBtn.disabled = true;
 
-          const quantity = Number(overlay.querySelector("#fm-quantity").value);
-          const price = Number(overlay.querySelector("#fm-price").value);
+          const quantity = Number(quantityInput.value);
+          const price = Number(priceInput.value);
           const feeRaw = overlay.querySelector("#fm-fee").value;
           const fee = feeRaw === "" ? 0 : Number(feeRaw);
-          const tradedAtRaw = overlay.querySelector("#fm-traded-at").value;
-          let tradedAtIso = null;
-          if (tradedAtRaw) {
-            const d = new Date(tradedAtRaw);
-            tradedAtIso = Number.isNaN(d.getTime()) ? null : d.toISOString();
-          }
+          // 入力欄は日本時間で見せている（app.js の toDatetimeLocalValue）
+          // ので、読み戻しも日本時間として読む。new Date(raw) は端末の
+          // ローカル時刻として解釈してしまうので使わない。
+          const tradedAtIso = jstLocalToIso(overlay.querySelector("#fm-traded-at").value);
+          const wasPriceDifferent = isBuy && priceDiffers();
 
           const result = await postFill({
             client_key: clientKey || undefined,
@@ -366,10 +516,26 @@
           forgetClientKey(keyScope);
 
           closeModal();
-          showTransientMessage(
-            result.created ? "記録しました" : "この売買は記録済みです",
-            "info"
-          );
+          // 提案と違う値段で買ったときは、**まだ利用者にやることが残って
+          // いる**（SBIの予約注文の置き直し）。4.5秒で消えるお知らせでは
+          // 読み終わる前に消えるので、閉じるまで残るお知らせにする。
+          if (wasPriceDifferent) {
+            showStickyMessage(
+              [
+                `${result.created ? "記録しました" : "この売買は記録済みです"}。提案の値段（${yen(
+                  proposedPrice
+                )}）と違う ${yen(price)} で買ったので、損切りの値段は買った値段をもとに計算し直されます。`,
+                `SBIに置いた予約注文は、提案のカードに出ていた ${yen(
+                  proposal.stop_loss
+                )} のままです。このままだと、ルールで決めた損切りとずれた注文が置きっぱなしになります。`,
+                "この記録が反映されると（次の自動処理のとき）、「保有」の画面にこの銘柄が出ます。そこに出ている損切りの値段を見て、SBIの予約注文をその値段に置き直してください。",
+              ],
+              "danger",
+              { href: "/holdings.html", label: "「保有」の画面を開く" }
+            );
+          } else {
+            showTransientMessage(result.created ? "記録しました" : "この売買は記録済みです", "info");
+          }
           await loadAndRender();
         });
       }
@@ -435,23 +601,16 @@
 
       // 「反映できていない記録」の帯は3つの画面で共通なので app.js にある。
 
-      // 記録済み（まだ反映されていない）提案かどうかを引くための鍵の集合を作る。
+      // 記録済み（まだ反映されていない）提案の引き当ては app.js に置いた
+      // indexUnappliedFills / recordedFillForProposal / failedFillForProposal
+      // を使う（3つの画面で同じ決まりにするため）。
       //
-      // [買った]／[売った]を記録しても、提案の outcome が変わるのは
-      // 反映が走ったあと。それまで /api/state は同じ提案を pending の
-      // まま返すので、何もしないと「記録したのに、まだボタン付きの
-      // カードが出ている」状態になり、もう一度記録してしまう。
-      // unapplied_fills（未反映の記録）と銘柄・売買の向きで突き合わせる。
-      function recordedKeys(fills) {
-        const keys = new Set();
-        if (!Array.isArray(fills)) return keys;
-        for (const f of fills) {
-          if (f && typeof f.symbol === "string" && typeof f.side === "string") {
-            keys.add(`${f.symbol}:${f.side}`);
-          }
-        }
-        return keys;
-      }
+      // **決まりは2つ。** どちらも実際に起きた事故に対応している:
+      //   1. 引き当ては proposal_id で行う。銘柄＋向きだけで引くと、
+      //      同じ銘柄・同じ向きの提案が2件あるときに、片方を記録した
+      //      だけで両方が「記録済み」になる。
+      //   2. 反映に失敗した記録（apply_error 付き）は「記録済み」に
+      //      数えない。数えると、その銘柄のボタンが永久に押せなくなる。
 
       // 売りの提案カードの、いちばん目立つ枠。
       //
@@ -498,10 +657,18 @@
         return block;
       }
 
-      // recorded: recordedKeys() が返す Set。
-      function renderProposalCard(p, recorded) {
+      // fillIndex: app.js の indexUnappliedFills() が返す索引。
+      function renderProposalCard(p, fillIndex) {
         const isBuy = p.action === "buy";
-        const isRecorded = recorded instanceof Set && recorded.has(`${p.symbol}:${p.action}`);
+        const isRecorded = recordedFillForProposal(fillIndex, p.id, p.symbol, p.action);
+        const applyError = failedFillForProposal(fillIndex, p.id, p.symbol, p.action);
+        // 買いの提案で、この銘柄をすでに持っている場合。押すと買い増しに
+        // なるので押させない。**売りの提案では持っているのが当たり前**
+        // なので、警告を出さない（毎回出す警告は読まれなくなる）。
+        const isAlreadyHeld = isBuy && p.already_held === true;
+        // 会社名。取れていない銘柄では出さないだけにする（この1件のせいで
+        // カード全体を落とさない）。
+        const nameText = typeof p.name === "string" && p.name.trim() !== "" ? p.name : null;
         const card = document.createElement("div");
         card.className = "card";
 
@@ -514,6 +681,7 @@
         }</span>
             <span class="proposal-symbol">${escapeHtml(p.symbol)}</span>
             <span class="proposal-bucket">${escapeHtml(p.bucket)}枠</span>
+            ${nameText ? `<div class="proposal-name">${escapeHtml(nameText)}</div>` : ""}
           </div>
           <div class="days-old ${p.days_old > 0 ? "days-old-warn" : ""}">
             ${p.days_old > 0 ? `${p.days_old}日前の提案` : "今日の提案"}
@@ -521,12 +689,49 @@
         `;
         card.appendChild(head);
 
+        if (isAlreadyHeld) {
+          const held = document.createElement("div");
+          held.className = "already-held-block";
+          held.innerHTML = `
+            <div class="already-held-title">この銘柄は、いま持っています</div>
+            <div class="already-held-body">
+              <strong>この提案では買わないでください。</strong>
+              すでに持っている銘柄をもう一度買うと（買い増しすると）、平均の買値が変わるので、
+              SBIに置いてある予約注文（値下がりしたら自動で売る注文）の値段も株数も合わなくなります。
+              枠の数え方も狂います。<br>
+              この提案は［見送る］を押してください。売るときは「保有」の画面から記録します。
+            </div>
+          `;
+          card.appendChild(held);
+        }
+
         if (isRecorded) {
           const recordedNote = document.createElement("div");
           recordedNote.className = "recorded-badge";
           recordedNote.textContent =
             "記録済み（反映待ち）。この売買はもう届いています。次の自動処理でこのカードは消えます。もう一度記録しないでください。";
           card.appendChild(recordedNote);
+        }
+
+        // 反映に失敗した記録がある場合。**この記録は保有にも現金にも
+        // 入っていない**ので、ボタンは押せるままにしたうえで、
+        // 失敗した理由をそのまま見せる（画面上部の帯にも出ているが、
+        // どのカードの話なのかはカードに書かないと分からない）。
+        if (applyError) {
+          const failed = document.createElement("div");
+          failed.className = "fill-error-badge";
+          const title = document.createElement("div");
+          title.className = "fill-error-title";
+          title.textContent = "この記録は反映できませんでした";
+          const reason = document.createElement("div");
+          reason.textContent = `理由：${applyError}`;
+          const next = document.createElement("div");
+          next.textContent =
+            "この売買は保有にも現金にも入っていません。理由を直したうえで、もう一度記録し直すか、［見送る］を押してください。";
+          failed.appendChild(title);
+          failed.appendChild(reason);
+          failed.appendChild(next);
+          card.appendChild(failed);
         }
 
         card.appendChild(isBuy ? renderStopLossBlock(p) : renderSellActionBlock(p));
@@ -595,9 +800,20 @@
 
         // すでに記録した（まだ反映されていない）提案は、もう一度
         // 記録できないようにする。二重に記録されるとお金の記録が狂う。
+        //
+        // **［見送る］は止めない。** 記録を間違えた提案を見送りにする道が
+        // 無くなると、利用者は反映を待つ以外に手が無くなる。見送りは
+        // お金を動かさない操作なので、二重記録の危険も無い。
         if (isRecorded) {
           fillBtn.disabled = true;
-          skipBtn.disabled = true;
+          fillBtn.title = "この売買はもう記録されています";
+        }
+
+        // 持っている銘柄の買い増しになる提案は押させない。
+        // （［見送る］は押せるままにして、この提案を片付けられるようにする。）
+        if (isAlreadyHeld) {
+          fillBtn.disabled = true;
+          fillBtn.title = "この銘柄はいま持っているので、買い増しはできません";
         }
 
         actions.appendChild(fillBtn);
@@ -702,10 +918,10 @@
           empty.textContent = "いま未実行の提案はありません。";
           main.appendChild(empty);
         } else {
-          const recorded = recordedKeys(state.unapplied_fills);
+          const fillIndex = indexUnappliedFills(state.unapplied_fills);
           for (const p of proposals) {
             try {
-              main.appendChild(renderProposalCard(p, recorded));
+              main.appendChild(renderProposalCard(p, fillIndex));
             } catch (err) {
               console.error("提案カードの表示に失敗しました", err);
               const bad = document.createElement("div");

@@ -36,6 +36,7 @@
         pct,
         whenText,
         toDatetimeLocalValue,
+        jstLocalToIso,
         escapeHtml,
         banner,
         renderNav,
@@ -45,6 +46,9 @@
         clientKeyFor,
         forgetClientKey,
         isJapaneseStock,
+        indexUnappliedFills,
+        recordedFillForSymbol,
+        failedFillForSymbol,
       } from "/app.js";
 
       // 回転枠の期限（rules/v3.md）。/api/state の positions には
@@ -107,6 +111,12 @@
             <div class="form-row">
               <label>銘柄コード</label>
               <div class="form-row-static">${escapeHtml(position.symbol)}</div>
+              ${
+                // 会社名。取れていない銘柄では出さないだけにする。
+                typeof position.name === "string" && position.name.trim() !== ""
+                  ? `<p class="hint-text">${escapeHtml(position.name)}</p>`
+                  : ""
+              }
             </div>
             <div class="form-row">
               <label>株数（保有 ${position.quantity ?? "—"}株）</label>
@@ -126,7 +136,7 @@
               <p class="hint-text">参考：損切りの目安 ${yen(position.stop_loss)} ／ 利確の目安 ${yen(position.take_profit)}</p>
             </div>
             <div class="form-row">
-              <label>売買した日時</label>
+              <label>売買した日時（日本時間）</label>
               <input type="datetime-local" id="fm-traded-at" value="${toDatetimeLocalValue(now)}">
             </div>
             <div class="form-row">
@@ -172,12 +182,10 @@
           const price = Number(overlay.querySelector("#fm-price").value);
           const feeRaw = overlay.querySelector("#fm-fee").value;
           const fee = feeRaw === "" ? 0 : Number(feeRaw);
-          const tradedAtRaw = overlay.querySelector("#fm-traded-at").value;
-          let tradedAtIso = null;
-          if (tradedAtRaw) {
-            const d = new Date(tradedAtRaw);
-            tradedAtIso = Number.isNaN(d.getTime()) ? null : d.toISOString();
-          }
+          // 入力欄は日本時間で見せている（app.js の toDatetimeLocalValue）
+          // ので、読み戻しも日本時間として読む。new Date(raw) は端末の
+          // ローカル時刻として解釈してしまうので使わない。
+          const tradedAtIso = jstLocalToIso(overlay.querySelector("#fm-traded-at").value);
 
           const result = await postFill({
             client_key: clientKey || undefined,
@@ -216,21 +224,21 @@
       // 1件の保有カードを組み立てる。ここで例外が出ても、呼び出し側
       // （renderMain）が1件ずつ try/catch しているので、他の保有の表示は
       // 巻き添えにならない。
-      // まだ反映されていない「売った」の記録がある銘柄の集合。
-      // 反映されるまで保有はそのまま残るので、これが無いと同じ売りを
-      // もう一度記録できてしまう（記録が2行入り、保有と現金が狂う）。
-      function pendingSellSymbols(fills) {
-        const set = new Set();
-        if (!Array.isArray(fills)) return set;
-        for (const f of fills) {
-          if (f && f.side === "sell" && typeof f.symbol === "string") set.add(f.symbol);
-        }
-        return set;
-      }
+      // まだ反映されていない「売った」の記録があるかどうかは、app.js の
+      // indexUnappliedFills / recordedFillForSymbol で引く（3つの画面で
+      // 同じ決まりにするため）。反映されるまで保有はそのまま残るので、
+      // これが無いと同じ売りをもう一度記録できてしまう（記録が2行入り、
+      // 保有と現金が狂う）。
+      //
+      // **反映に失敗した記録（apply_error 付き）は「記録済み」に数えない。**
+      // 失敗した記録は同じ理由で毎回失敗し続けるので、数えると
+      // ［売った］が永久に押せなくなる。fills を消す手段は画面にも API にも
+      // 無いので、そうなると利用者はそこから先へ進めない。
 
-      // pendingSells: pendingSellSymbols() が返す Set。
-      function renderPositionCard(position, pendingSells) {
-        const hasPendingSell = pendingSells instanceof Set && pendingSells.has(position.symbol);
+      // fillIndex: app.js の indexUnappliedFills() が返す索引。
+      function renderPositionCard(position, fillIndex) {
+        const hasPendingSell = recordedFillForSymbol(fillIndex, position.symbol, "sell");
+        const sellApplyError = failedFillForSymbol(fillIndex, position.symbol, "sell");
         const hasLastPrice = position.last_price !== null && position.last_price !== undefined;
         const isRotation = position.max_holding_days !== null && position.max_holding_days !== undefined;
         // 経過営業日・期限までの残り営業日は /api/state がすでに計算して
@@ -254,6 +262,26 @@
           card.appendChild(recordedNote);
         }
 
+        // 反映に失敗した「売った」の記録がある場合。**この売りは保有にも
+        // 現金にも入っていない**ので、［売った］は押せるままにしたうえで、
+        // 失敗した理由をそのまま見せる。
+        if (sellApplyError) {
+          const failed = document.createElement("div");
+          failed.className = "fill-error-badge";
+          const title = document.createElement("div");
+          title.className = "fill-error-title";
+          title.textContent = "この記録は反映できませんでした";
+          const reason = document.createElement("div");
+          reason.textContent = `理由：${sellApplyError}`;
+          const next = document.createElement("div");
+          next.textContent =
+            "この売りは保有にも現金にも入っていません。理由を直したうえで、もう一度記録し直してください。";
+          failed.appendChild(title);
+          failed.appendChild(reason);
+          failed.appendChild(next);
+          card.appendChild(failed);
+        }
+
         if (isOverdue) {
           const expiry = document.createElement("div");
           expiry.className = "expiry-block";
@@ -266,10 +294,17 @@
 
         const head = document.createElement("div");
         head.className = "proposal-card-head";
+        // 会社名。SBIの画面で銘柄コードを打ち込むときの照合用。
+        // **取れていない銘柄（name が null）では出さないだけにする。**
+        // ここで落とすと、会社名が引けなかった1件のために保有そのものが
+        // 見えなくなる（補助の失敗が本体を巻き添えにしてはいけない）。
+        const nameText =
+          typeof position.name === "string" && position.name.trim() !== "" ? position.name : null;
         head.innerHTML = `
           <div>
             <span class="proposal-symbol">${escapeHtml(position.symbol)}</span>
             <span class="proposal-bucket">${escapeHtml(position.bucket)}枠</span>
+            ${nameText ? `<div class="proposal-name">${escapeHtml(nameText)}</div>` : ""}
           </div>
         `;
         card.appendChild(head);
@@ -331,6 +366,22 @@
         `;
         card.appendChild(stopFigures);
 
+        // **この仕組みの唯一の安全装置は、SBIに置いてある予約注文だけ。**
+        // ここに出ている損切りの値段は、実際に買った値段から計算し直された
+        // 値（src/investment/fills.py の _exits）で、提案のカードに出ていた
+        // 値段とは限らない。提案と違う値段で約定すると両者はずれるが、
+        // SBIの注文は誰も置き直さない。**そのずれに気づけるのはこの画面
+        // だけ**なので、条件を付けずに常に出す。
+        const stopCheck = document.createElement("div");
+        stopCheck.className = "stop-check-note";
+        stopCheck.innerHTML = `
+          SBIに置いてある予約注文（この値段まで下がったら自動で売る注文。SBIでは「逆指値」と呼びます）が、
+          <strong>上の「損切り」の値段になっているか確かめてください。</strong><br>
+          提案と違う値段で買ったときは、ここの損切りの値段が提案のカードと変わります。
+          SBIの注文を置き直さないと、値下がりしたときの損が、ルールで決めた幅と違ってしまいます。
+        `;
+        card.appendChild(stopCheck);
+
         // 回転枠の期限（まだ期限切れではない場合の、控えめな表示）
         //
         // 「回転枠」は、値動きに関係なく決まった日数で結論を出す枠
@@ -386,10 +437,10 @@
           empty.textContent = "いま保有している銘柄はありません。";
           main.appendChild(empty);
         } else {
-          const pendingSells = pendingSellSymbols(state.unapplied_fills);
+          const fillIndex = indexUnappliedFills(state.unapplied_fills);
           for (const position of positions) {
             try {
-              main.appendChild(renderPositionCard(position, pendingSells));
+              main.appendChild(renderPositionCard(position, fillIndex));
             } catch (err) {
               console.error("保有カードの表示に失敗しました", err);
               const bad = document.createElement("div");

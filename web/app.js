@@ -294,14 +294,59 @@ export function whenText(iso) {
   return `${month}月${day}日 ${hour}:${minute}`;
 }
 
-// <input type="datetime-local"> の初期値用（ブラウザのローカル時刻表記）。
+// <input type="datetime-local"> の初期値用。
 // "2026-09-08T16:02" のような、タイムゾーンを持たない文字列を返す。
+//
+// **whenText と同じく、常に日本時間（Asia/Tokyo）で出す。**
+// 以前は端末のローカル時刻（date.getHours() など）を使っていたため、
+// iPhone のタイムゾーンが日本以外だと、同じ画面の中で
+// 「提案が出たのは 9月8日 10:30」（日本時間）と
+// 「売買した日時 2026-09-08T01:30」（端末の時刻）が並び、
+// どちらを基準に入れればよいのか分からなくなっていた。
+//
+// **この関数を日本時間にする以上、入力された文字列を読み戻す側も
+// 日本時間として読まなければならない**（下の jstLocalToIso）。
+// new Date("2026-09-08T16:02") は端末のローカル時刻として解釈するので、
+// 表示だけ日本時間にして読み戻しを変えないと、記録される時刻が
+// 端末のずれのぶんだけ間違ったものになる。
+const JST_DATETIME_LOCAL_FORMAT = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "Asia/Tokyo",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  hourCycle: "h23",
+});
+
 export function toDatetimeLocalValue(date) {
-  const pad = (n) => String(n).padStart(2, "0");
-  return (
-    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}` +
-    `T${pad(date.getHours())}:${pad(date.getMinutes())}`
-  );
+  const parts = JST_DATETIME_LOCAL_FORMAT.formatToParts(date);
+  const part = (type) => parts.find((p) => p.type === type)?.value ?? "";
+  const year = part("year");
+  const month = part("month");
+  const day = part("day");
+  const hour = part("hour");
+  const minute = part("minute");
+  if (!year || !month || !day || !hour || !minute) return "";
+  return `${year}-${month}-${day}T${hour}:${minute}`;
+}
+
+// toDatetimeLocalValue が入れた（そして利用者が直した）
+// "2026-09-08T16:02" を、**日本時間として読んで** ISO 文字列にする。
+//
+// 日本時間は UTC+9 の固定で、夏時間による切り替えが無い。だから
+// 「日本時間の 16:02」は「UTCの 07:02」であり、Date.UTC の時に 9 を
+// 引くだけで正確に出せる（Date.UTC は時が負でも前日に繰り下がる）。
+//
+// 読めない文字列（空・形が違う）は null を返す。呼び出し側は
+// null を「日時の指定なし」としてサーバーに渡す。
+export function jstLocalToIso(raw) {
+  if (typeof raw !== "string") return null;
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(raw);
+  if (!m) return null;
+  const ms = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4]) - 9, Number(m[5]));
+  if (Number.isNaN(ms)) return null;
+  return new Date(ms).toISOString();
 }
 
 // HTMLへ埋め込む文字列のエスケープ（rationale などDB由来の文字列を
@@ -352,22 +397,135 @@ export function renderUnappliedBanner(root, fills) {
 
   const list = document.createElement("ul");
   list.className = "unapplied-list";
+  let hasFailed = false;
   for (const f of fills) {
     const li = document.createElement("li");
     const sideText = f.side === "sell" ? "売り" : "買い";
-    const reason = f.apply_error || "まだ反映されていません（次の自動処理を待っています）";
-    li.textContent = `${f.symbol}（${sideText}） … ${reason}`;
+    // 銘柄と売買の向きだけでは、同じ銘柄を2回記録したときに
+    // どちらの記録のことなのか分からない。株数と値段も来ているので
+    // 一緒に出して、見分けられるようにする。
+    const quantityText =
+      typeof f.quantity === "number" && Number.isFinite(f.quantity) ? `${f.quantity}株` : "株数が不明";
+    const priceText =
+      typeof f.price === "number" && Number.isFinite(f.price) ? `1株 ${yen(f.price)}` : "値段が不明";
+    const reason = f.apply_error
+      ? `反映できませんでした：${f.apply_error}`
+      : "まだ反映されていません（次の自動処理を待っています）";
+    if (f.apply_error) hasFailed = true;
+    li.textContent = `${f.symbol}（${sideText}） ${quantityText} ・ ${priceText} … ${reason}`;
     list.appendChild(li);
   }
   wrap.appendChild(list);
 
   const note = document.createElement("div");
   note.className = "unapplied-note";
-  note.textContent =
-    "反映されるまで、保有と収支の表示は変わりません。記録はもう届いているので、同じ売買をもう一度記録しないでください。";
+  // 「反映できませんでした」の記録は、保有にも現金にも入っていない。
+  // それを「もう届いているから触るな」と言うと、利用者はそこから
+  // 先へ進めなくなる（同じ理由で毎回失敗し続けるため）。
+  note.textContent = hasFailed
+    ? "反映されるまで、保有と収支の表示は変わりません。まだ反映されていない記録は、もう届いているので同じ売買をもう一度記録しないでください。" +
+      "ただし「反映できませんでした」と出ている記録は、保有にも現金にも入っていません。理由を直したうえで、もう一度記録し直してください。"
+    : "反映されるまで、保有と収支の表示は変わりません。記録はもう届いているので、同じ売買をもう一度記録しないでください。";
   wrap.appendChild(note);
 
   root.appendChild(wrap);
+}
+
+// ---------------------------------------------------------------------------
+// 反映待ちの記録の引き当て
+//
+// [買った]／[売った]を記録しても、提案や保有の見た目が変わるのは
+// 反映（GitHub Actions の次回実行）が済んだあと。それまでは同じ提案・
+// 同じ保有がボタン付きで出たままなので、二重に記録しないよう
+// unapplied_fills と突き合わせてボタンを止める必要がある。
+//
+// **ここで守っている決まりは2つ。**
+//
+// 1. 引き当ては proposal_id で行う。銘柄コードと売買の向きだけで
+//    引くと、同じ銘柄・同じ向きの提案が2件並んだときに、片方だけ
+//    記録したのに両方が「記録済み」になる。反映後、記録していない
+//    ほうが生き返り、そこで [買った] を押すと保有中の銘柄の買い増しに
+//    なる（この仕組みが禁じている操作）。proposal_id を持たない記録
+//    （保有画面から出した売りなど）だけ、銘柄＋向きで引く。
+//
+// 2. **apply_error が付いた記録は「記録済み」に数えない。**
+//    反映に失敗した記録は、同じ理由で毎回失敗し続け、放っておいても
+//    決して反映されない。それを「記録済み」として扱うと、その銘柄の
+//    ボタンが永久に押せなくなる。fills を消す手段は画面にも API にも
+//    無いので、iPhone しか持っていない利用者はそこで詰む。
+//    数えない代わりに、失敗した理由をカードに出す（下の failedFillFor）。
+// ---------------------------------------------------------------------------
+
+function fillKey(symbol, side) {
+  return `${symbol}:${side}`;
+}
+
+// fills: /api/state の unapplied_fills。
+// 戻り値は recordedFillFor / failedFillFor に渡すための索引。
+export function indexUnappliedFills(fills) {
+  const index = {
+    // 提案に紐づいた記録（proposal_id あり）
+    recordedByProposal: new Set(),
+    failedByProposal: new Map(),
+    // 提案に紐づかない記録（proposal_id が null。保有画面からの売りなど）
+    recordedByLooseSymbolSide: new Set(),
+    failedByLooseSymbolSide: new Map(),
+    // 銘柄＋向きだけで引くとき用（保有画面はこちらを使う）。
+    // proposal_id の有無にかかわらず全部入っている。
+    recordedBySymbolSide: new Set(),
+    failedBySymbolSide: new Map(),
+  };
+  if (!Array.isArray(fills)) return index;
+  for (const f of fills) {
+    if (!f || typeof f.symbol !== "string" || typeof f.side !== "string") continue;
+    const hasProposalId = f.proposal_id !== null && f.proposal_id !== undefined;
+    const key = fillKey(f.symbol, f.side);
+    if (f.apply_error) {
+      const reason = typeof f.apply_error === "string" ? f.apply_error : String(f.apply_error);
+      if (hasProposalId) index.failedByProposal.set(f.proposal_id, reason);
+      else if (!index.failedByLooseSymbolSide.has(key)) index.failedByLooseSymbolSide.set(key, reason);
+      if (!index.failedBySymbolSide.has(key)) index.failedBySymbolSide.set(key, reason);
+      // **記録済みには数えない。** 数えるとボタンが永久に押せなくなる。
+      continue;
+    }
+    if (hasProposalId) index.recordedByProposal.add(f.proposal_id);
+    else index.recordedByLooseSymbolSide.add(key);
+    index.recordedBySymbolSide.add(key);
+  }
+  return index;
+}
+
+// 提案に対する引き当て。**まず proposal_id で引く。**
+// proposal_id を持たない記録だけ、銘柄＋向きで引く。
+export function recordedFillForProposal(index, proposalId, symbol, side) {
+  if (!index) return false;
+  if (proposalId !== null && proposalId !== undefined && index.recordedByProposal.has(proposalId)) {
+    return true;
+  }
+  return index.recordedByLooseSymbolSide.has(fillKey(symbol, side));
+}
+
+// 保有（提案を経由しない）に対する引き当て。銘柄＋向きで引く。
+export function recordedFillForSymbol(index, symbol, side) {
+  if (!index) return false;
+  return index.recordedBySymbolSide.has(fillKey(symbol, side));
+}
+
+// 提案に対する「反映できなかった理由」（無ければ null）。
+// 引き当ての決まりは recordedFillForProposal と同じにする。
+export function failedFillForProposal(index, proposalId, symbol, side) {
+  if (!index) return null;
+  if (proposalId !== null && proposalId !== undefined) {
+    const byProposal = index.failedByProposal.get(proposalId);
+    if (byProposal) return byProposal;
+  }
+  return index.failedByLooseSymbolSide.get(fillKey(symbol, side)) ?? null;
+}
+
+// 保有に対する「反映できなかった理由」（無ければ null）。
+export function failedFillForSymbol(index, symbol, side) {
+  if (!index) return null;
+  return index.failedBySymbolSide.get(fillKey(symbol, side)) ?? null;
 }
 
 // ---------------------------------------------------------------------------

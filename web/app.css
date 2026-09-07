@@ -281,6 +281,63 @@ a {
   margin-top: 6px;
 }
 
+/* 会社名。銘柄コード（7203.T）だけを頼りにSBIへ手で打ち込むと、
+   打ち間違えても気づけない。コードは消さずに、その下に会社名を添える。
+   name が取れなかった銘柄ではこの要素自体を出さない（index.html /
+   holdings.html を参照）。 */
+.proposal-name {
+  font-size: 14px;
+  color: var(--text);
+  margin-top: 2px;
+  line-height: 1.35;
+  /* 長い会社名でも横スクロールを起こさない（iPhoneの375px） */
+  overflow-wrap: anywhere;
+}
+
+/* 「この銘柄はいま持っています」＝押してはいけない買いの提案。
+   **買いの .stop-loss-block（赤・30px）がこの画面でいちばん目立つ状態を
+   保つため、こちらは黄色・小さめの文字にしてある。** */
+.already-held-block {
+  margin-top: 12px;
+  padding: 10px 12px;
+  background: var(--warn-bg);
+  border: 2px solid var(--warn);
+  border-radius: 12px;
+}
+
+.already-held-title {
+  font-size: 16px;
+  font-weight: 800;
+  color: var(--warn);
+  line-height: 1.3;
+}
+
+.already-held-body {
+  font-size: 13px;
+  color: var(--text);
+  line-height: 1.6;
+  margin-top: 4px;
+}
+
+/* 反映に失敗した記録を、カードの中で伝える札。
+   （画面上部の帯にも出るが、どのカードの話かはここに書かないと分からない。）
+   小さい文字にして、買いカードの損切りの赤枠より目立たないようにする。 */
+.fill-error-badge {
+  margin-top: 10px;
+  padding: 8px 10px;
+  background: var(--danger-bg);
+  border: 1px solid var(--danger-border);
+  border-radius: 10px;
+  font-size: 13px;
+  color: #ffd7d7;
+  line-height: 1.5;
+}
+
+.fill-error-title {
+  font-weight: 700;
+  color: var(--danger);
+}
+
 /* 記録したがまだ反映されていないことを、カードの中で伝える札 */
 .recorded-badge {
   margin-top: 10px;
@@ -595,6 +652,33 @@ button:disabled,
   font-size: 13px;
   color: #ffb3b3;
   margin-top: 2px;
+}
+
+/* 保有カードで、損切りの値段の下に必ず出す確認。
+   SBIに置いた予約注文がこの値段になっているかを確かめてもらう
+   （提案と違う値段で買うと、ここの値段は提案のカードと変わる）。 */
+.stop-check-note {
+  margin-top: 8px;
+  padding: 10px 12px;
+  background: var(--warn-bg);
+  border: 1px solid var(--warn);
+  border-radius: 10px;
+  font-size: 13px;
+  color: var(--text);
+  line-height: 1.6;
+}
+
+.stop-check-note strong {
+  color: var(--warn);
+}
+
+/* 勝手に消えないお知らせの中の、他の画面へのリンク（高さ44px以上） */
+.sticky-link {
+  display: block;
+  min-height: 44px;
+  line-height: 44px;
+  margin-top: 8px;
+  font-weight: 700;
 }
 
 /* 一部だけ売るときの注意（予約注文の株数がずれる） */
