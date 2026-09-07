@@ -121,3 +121,25 @@ def select_cash(conn) -> dict[str, float]:
     with conn.cursor() as cur:
         cur.execute("SELECT currency, amount FROM cash")
         return {r["currency"]: float(r["amount"]) for r in cur.fetchall()}
+
+
+def init_cash(conn, jpy: float) -> int:
+    """現金残高を初期化する。何度実行しても安全（冪等）。
+
+    JPY を指定額、USD を 0 で初期化する。通貨ごとに ON CONFLICT DO NOTHING を
+    使うため、既に残高がある通貨（取引などで変動済みのもの）には一切触れず、
+    上書きしない。戻り値は新規に挿入した通貨の件数（0〜2）。
+    """
+    inserted = 0
+    with conn.cursor() as cur:
+        for currency, amount in (("JPY", jpy), ("USD", 0)):
+            cur.execute(
+                """
+                INSERT INTO cash (currency, amount) VALUES (%s, %s)
+                ON CONFLICT (currency) DO NOTHING
+                """,
+                (currency, amount),
+            )
+            inserted += cur.rowcount
+    conn.commit()
+    return inserted

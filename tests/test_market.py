@@ -126,3 +126,56 @@ def test_fetch_fundamentals_equity_ratio_none_when_total_assets_is_nan():
         f = fetch_fundamentals("3993")
 
     assert f.equity_ratio is None
+
+
+from investment.market import fetch_last_price
+
+
+def _history_stub(closes: list[float]) -> pd.DataFrame:
+    return pd.DataFrame({"Close": closes})
+
+
+def test_fetch_last_price_returns_latest_close():
+    ticker = MagicMock()
+    ticker.history.return_value = _history_stub([2500.0, 2550.5])
+    with patch("investment.market.yf.Ticker", return_value=ticker):
+        price = fetch_last_price("7203")
+
+    assert price == 2550.5
+
+
+def test_fetch_last_price_normalizes_symbol():
+    ticker = MagicMock()
+    ticker.history.return_value = _history_stub([1500.0])
+    with patch("investment.market.yf.Ticker", return_value=ticker) as mock_ticker_cls:
+        fetch_last_price("7203")
+
+    mock_ticker_cls.assert_called_once_with("7203.T")
+
+
+def test_fetch_last_price_raises_when_history_is_empty():
+    ticker = MagicMock()
+    ticker.history.return_value = pd.DataFrame()
+    with (
+        patch("investment.market.yf.Ticker", return_value=ticker),
+        pytest.raises(MarketDataError),
+    ):
+        fetch_last_price("7203")
+
+
+def test_fetch_last_price_raises_when_close_is_nan():
+    ticker = MagicMock()
+    ticker.history.return_value = _history_stub([float("nan")])
+    with (
+        patch("investment.market.yf.Ticker", return_value=ticker),
+        pytest.raises(MarketDataError),
+    ):
+        fetch_last_price("7203")
+
+
+def test_fetch_last_price_raises_on_network_failure():
+    with (
+        patch("investment.market.yf.Ticker", side_effect=OSError("network down")),
+        pytest.raises(MarketDataError),
+    ):
+        fetch_last_price("7203")

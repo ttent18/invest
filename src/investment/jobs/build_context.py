@@ -8,10 +8,38 @@ import sys
 from pathlib import Path
 
 from investment.config import SCREEN, SETTINGS, ScreenCriteria, Settings
-from investment.db import connect, select_cash, select_positions, select_screened
+from investment.db import connect, record_gap, select_cash, select_positions, select_screened
+from investment.market import MarketDataError, fetch_last_price
 
 RULE_VERSION = "v1"
 OUTPUT = Path("build/context.json")
+
+
+def _attach_last_price(conn, candidates: list[dict]) -> list[dict]:
+    """各候補に直近の株価 (last_price) を付与する。
+
+    株価は Task 10 の AI が entry_price / take_profit / stop_loss / quantity を
+    答えるために必須。取得できない銘柄で判断させると数字をでっち上げることに
+    なり、Task 9 の検証（株数上限・必要勝率の計算）も無意味になるため、
+    株価が取れなかった銘柄は候補から除外する（古い価格は使わない）。
+    除外した事実は record_gap に記録し、標準出力にも出す。
+    """
+    priced = []
+    excluded = 0
+    for c in candidates:
+        symbol = c["symbol"]
+        try:
+            last_price = fetch_last_price(symbol)
+        except MarketDataError as exc:
+            excluded += 1
+            record_gap(conn, scope=f"price:{symbol}", detail=str(exc))
+            continue
+        priced.append({**c, "last_price": last_price})
+
+    if excluded:
+        print(f"株価が取れなかったため {excluded} 件を候補から除外しました")
+
+    return priced
 
 
 def build(conn, settings: Settings, criteria: ScreenCriteria, limit: int) -> dict:
@@ -19,6 +47,7 @@ def build(conn, settings: Settings, criteria: ScreenCriteria, limit: int) -> dic
     candidates = select_screened(conn, criteria, limit)
     positions = select_positions(conn)
     cash = select_cash(conn)
+    priced_candidates = _attach_last_price(conn, [dict(c) for c in candidates])
 
     return {
         "is_virtual": True,
@@ -43,7 +72,7 @@ def build(conn, settings: Settings, criteria: ScreenCriteria, limit: int) -> dic
         "cash": cash,
         "positions": [dict(p) for p in positions],
         "can_open_new": len(positions) < settings.max_positions,
-        "candidates": [dict(c) for c in candidates],
+        "candidates": priced_candidates,
     }
 
 

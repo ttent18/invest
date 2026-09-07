@@ -104,3 +104,24 @@ def fetch_fundamentals(code: str) -> Fundamentals:
         roe=_as_float(info.get("returnOnEquity")),
         equity_ratio=_equity_ratio(balance),
     )
+
+
+def fetch_last_price(code: str) -> float:
+    """直近の終値（または最終取引価格）を取得する。
+
+    取得できなければ MarketDataError を投げる。0 や None を返さない。
+    このエラーが出た銘柄は判断を行わない（古い価格を使わない）。
+    """
+    symbol = normalize_symbol(code)
+    try:
+        ticker = yf.Ticker(symbol)
+        history = ticker.history(period="5d")
+    except Exception as exc:  # yfinance は多様な例外を投げる
+        raise MarketDataError(
+            f"{symbol} の株価取得に失敗しました ({type(exc).__name__}: {exc})"
+        ) from exc
+
+    price = None if history.empty else _as_float(history["Close"].iloc[-1])
+    if price is None or price <= 0:
+        raise MarketDataError(f"{symbol} の株価が取得できませんでした")
+    return price
