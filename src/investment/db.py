@@ -97,3 +97,13 @@ def select_screened(conn, criteria: ScreenCriteria, limit: int) -> list[dict]:
             ),
         )
         return list(cur.fetchall())
+
+
+def record_gap(conn, scope: str, detail: str) -> None:
+    """データが取れなかった事実を残す。取れたことにしない。"""
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO data_gaps (occurred_at, scope, detail) VALUES (NOW(), %s, %s)",
+            (scope, detail),
+        )
+    conn.commit()
