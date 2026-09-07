@@ -17,7 +17,9 @@ def conn():
     with connect(TEST_URL) as c:
         apply_migrations(c)
         with c.cursor() as cur:
-            cur.execute("TRUNCATE fundamentals, trades, positions, proposals, cash, data_gaps")
+            cur.execute(
+                "TRUNCATE fundamentals, trades, positions, proposals, cash, data_gaps, fills"
+            )
         c.commit()
         yield c
 

@@ -28,7 +28,10 @@ def conn():
     with connect(TEST_URL) as c:
         apply_migrations(c)
         with c.cursor() as cur:
-            cur.execute("TRUNCATE fundamentals, trades, positions, proposals, cash, data_gaps")
+            cur.execute(
+                "TRUNCATE fundamentals, trades, positions, proposals, cash, data_gaps, "
+                "fills, push_subscriptions"
+            )
         c.commit()
         yield c
 
@@ -225,3 +228,76 @@ def test_select_capital_ignores_currencies_other_than_yen(conn):
     conn.commit()
 
     assert select_capital(conn) == 100000.0
+
+
+def test_fills_table_accepts_a_recorded_purchase(conn):
+    """利用者が申告した約定を、そのまま1行入れられること。"""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO fills (symbol, side, quantity, price, currency)
+            VALUES ('1111.T', 'buy', 100, 899, 'JPY')
+            RETURNING id, applied_at, apply_error
+            """
+        )
+        row = cur.fetchone()
+    conn.commit()
+
+    assert row["id"] > 0
+    assert row["applied_at"] is None  # 入れた直後は未反映
+    assert row["apply_error"] is None
+
+
+def test_fills_table_rejects_a_side_that_is_neither_buy_nor_sell(conn):
+    with conn.cursor() as cur, pytest.raises(psycopg.errors.CheckViolation):
+        cur.execute(
+            """
+            INSERT INTO fills (symbol, side, quantity, price, currency)
+            VALUES ('1111.T', 'なんとなく', 100, 899, 'JPY')
+            """
+        )
+
+
+def test_fills_table_rejects_zero_or_negative_quantity(conn):
+    with conn.cursor() as cur, pytest.raises(psycopg.errors.CheckViolation):
+        cur.execute(
+            """
+            INSERT INTO fills (symbol, side, quantity, price, currency)
+            VALUES ('1111.T', 'buy', 0, 899, 'JPY')
+            """
+        )
+
+
+def test_trades_table_can_record_the_bucket_and_the_result(conn):
+    """枠ごとの成績を出すために、売った時点の結果を取引に残せること。"""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO trades
+                (executed_at, symbol, side, quantity, price, currency,
+                 bucket, realized_pnl, holding_days)
+            VALUES (NOW(), '1111.T', 'sell', 100, 1100, 'JPY', '回転', 20000, 9)
+            RETURNING bucket, realized_pnl, holding_days
+            """
+        )
+        row = cur.fetchone()
+    conn.commit()
+
+    assert row["bucket"] == "回転"
+    assert float(row["realized_pnl"]) == 20000.0
+    assert row["holding_days"] == 9
+
+
+def test_push_subscriptions_are_unique_per_endpoint(conn):
+    """同じ端末から2回登録しても、行が増えないこと。"""
+    sql = """
+        INSERT INTO push_subscriptions (endpoint, p256dh, auth)
+        VALUES ('https://example.test/abc', 'k1', 'a1')
+        ON CONFLICT (endpoint) DO UPDATE SET p256dh = EXCLUDED.p256dh
+    """
+    with conn.cursor() as cur:
+        cur.execute(sql)
+        cur.execute(sql)
+        cur.execute("SELECT COUNT(*) AS c FROM push_subscriptions")
+        assert cur.fetchone()["c"] == 1
+    conn.commit()
