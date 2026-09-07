@@ -7,15 +7,18 @@ import json
 import sys
 from pathlib import Path
 
-from investment.config import SETTINGS, Settings
+from investment.config import BUCKETS, SETTINGS, Settings, bucket_by_name
 from investment.db import connect, record_gap
 from investment.market import is_japanese, lot_size
 from investment.sizing import position_size, required_win_rate
 
 REQUIRED_FIELDS = (
     "symbol", "action", "entry_price", "take_profit", "stop_loss",
-    "quantity", "rationale", "scenario", "confidence", "strategy_tag", "bucket",
+    "quantity", "rationale", "scenario", "confidence", "strategy_tag",
 )
+# 買いのときだけ必須。売りの枠は「その銘柄を買ったときの枠」で決まっているので、
+# AIに書かせず保有から取る（書かせると、書き忘れや保有と違う枠を書く事故が起きる）。
+BUY_ONLY_REQUIRED_FIELDS = ("bucket",)
 VALID_CONFIDENCE = {"low", "mid", "high"}
 VALID_ACTION = {"buy", "sell"}
 
@@ -28,11 +31,23 @@ VALID_ACTION = {"buy", "sell"}
 # 目安として選んだ値。
 ENTRY_PRICE_TOLERANCE = 0.10
 
-# 利確・損切りの値が、枠の決めた幅と一致しているとみなす許容誤差（円）。
+# 利確・損切りの値が、枠の決めた幅と一致しているとみなす許容誤差。
+#
 # 例: 899円 × 1.22 = 1096.78円 のように端数が出るため、1円単位に丸めた値も
-# 通す必要がある。1円あれば丸めは吸収でき、ルール違反（+22%のところを+15%に
-# するなど）は必ず外れる。
-PRICE_MATCH_TOLERANCE_YEN = 1.0
+# 通す必要がある。四捨五入の誤差は最大0.5なので 0.51 あれば必ず吸収できる。
+# 一方、株価が高いほど丸め以外のわずかな差も出るため、価格の0.2%も見る。
+#
+# 固定値（1円）にしないのは、安い株では1円が相対的に大きすぎるため。
+# 株価100円だと1円は1%で、損切りが -7%〜-9% のどれでも通ってしまい、
+# まさに測ろうとしている数字が12.5%もぶれる。また米国株（ドル建て）が
+# 入ったとき、1ドルの誤差は50ドル株で+20%〜+24%を通してしまう。
+PRICE_MATCH_MIN_TOLERANCE = 0.51
+PRICE_MATCH_TOLERANCE_PCT = 0.002
+
+
+def _price_tolerance(price: float) -> float:
+    """この価格で、丸めによる差とみなす幅を返す。"""
+    return max(PRICE_MATCH_MIN_TOLERANCE, abs(price) * PRICE_MATCH_TOLERANCE_PCT)
 
 
 def _to_float(decision: dict, field: str) -> tuple[float | None, str | None]:
@@ -87,6 +102,10 @@ def validate(decision: dict, ctx: dict, settings: Settings) -> list[str]:
     for field in REQUIRED_FIELDS:
         if field not in decision:
             errors.append(f"{field} がありません")
+    if decision.get("action") == "buy":
+        for field in BUY_ONLY_REQUIRED_FIELDS:
+            if field not in decision:
+                errors.append(f"{field} がありません")
     if errors:
         return errors
 
@@ -145,31 +164,37 @@ def validate(decision: dict, ctx: dict, settings: Settings) -> list[str]:
         # 変わる。枠の指定が無い・知らない名前・幅が枠と違う、のいずれも却下する。
         # ここを通してしまうと「枠」が名前だけのラベルになり、
         # どちらの型が効いているのかを比べられなくなる。
+        #
+        # **枠の幅は investment.config.BUCKETS（コード）から取る。**
+        # context.json は AI が書き換えられる場所にあるため、そこに書かれた幅で
+        # 検証すると、AIが自分の数字を自分の数字で検証することになる。
+        # 一方、空き枠の数は「そのときの保有状況」なのでコンテキストから取る。
+        rule = bucket_by_name(decision["bucket"])
         buckets_by_name = {b["name"]: b for b in ctx.get("buckets", [])}
         bucket = buckets_by_name.get(decision["bucket"])
-        if bucket is None:
+        if rule is None or bucket is None:
             errors.append(
                 f"bucket {decision['bucket']!r} は知らない枠です"
-                f"（使えるのは {list(buckets_by_name)} のいずれか）"
+                f"（使えるのは {[b.name for b in BUCKETS]} のいずれか）"
             )
         else:
             if bucket["free"] <= 0:
                 errors.append(
-                    f"{bucket['name']}枠に空きがありません"
-                    f"（{bucket['slots']}枠すべて使用中）"
+                    f"{rule.name}枠に空きがありません"
+                    f"（{rule.slots}枠すべて使用中）"
                 )
             if entry is not None:
                 for field, pct, direction in (
-                    ("take_profit", bucket["take_profit_pct"], 1),
-                    ("stop_loss", bucket["stop_loss_pct"], -1),
+                    ("take_profit", rule.take_profit_pct, 1),
+                    ("stop_loss", rule.stop_loss_pct, -1),
                 ):
                     expected = entry * (1 + direction * pct)
                     actual = tp if field == "take_profit" else sl
                     if actual is None:
                         continue
-                    if abs(actual - expected) > PRICE_MATCH_TOLERANCE_YEN:
+                    if abs(actual - expected) > _price_tolerance(expected):
                         errors.append(
-                            f"{field} {actual} が{bucket['name']}枠の決まり"
+                            f"{field} {actual} が{rule.name}枠の決まり"
                             f"（買値の{direction * pct:+.0%}＝{expected:,.2f}円）"
                             f"と違います"
                         )
@@ -225,7 +250,19 @@ def validate(decision: dict, ctx: dict, settings: Settings) -> list[str]:
 
         if position is None:
             errors.append(f"{decision['symbol']} を保有していないため売却できません")
-        elif quantity is not None:
+        else:
+            # 売りの枠は、その銘柄を買ったときの枠で決まっている。
+            # AIが書いた値があっても、保有側の値で上書きする（保有が正）。
+            held_bucket = position.get("bucket")
+            if not held_bucket:
+                errors.append(
+                    f"{decision['symbol']} の保有にどの枠で買ったかの記録がありません"
+                    f"（枠が分からないまま保存すると、枠ごとの成績から漏れます）"
+                )
+            else:
+                decision["bucket"] = held_bucket
+
+        if position is not None and quantity is not None:
             held = int(position["quantity"])
             requested = quantity
             if requested > held:

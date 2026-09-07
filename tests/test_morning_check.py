@@ -242,14 +242,14 @@ def test_summarize_hits_present_returns_zero_even_with_partial_failures():
 def test_expired_lists_a_fast_bucket_position_past_its_deadline():
     """回転枠の銘柄が期限を過ぎていたら知らせること。"""
     positions = [
-        # 8/24(月)に買って、今日は9/8(月)。営業日で11日経過（期限10営業日）
+        # 8/24(月)に買って、今日は9/7(月)。営業日でちょうど10日経過
         {"symbol": "1111.T", "bucket": "回転", "opened_at": date(2026, 8, 24)},
     ]
-    expired = find_expired(positions, today=date(2026, 9, 8))
+    expired = find_expired(positions, today=date(2026, 9, 7))
 
     assert len(expired) == 1
     assert expired[0]["symbol"] == "1111.T"
-    assert expired[0]["business_days"] == 11
+    assert expired[0]["business_days"] == 10
     assert expired[0]["limit"] == 10
 
 
@@ -272,13 +272,25 @@ def test_expired_ignores_the_patient_bucket_which_has_no_deadline():
 def test_expired_counts_business_days_not_calendar_days():
     """土日を数えないこと。暦日で数えると、実際より早く期限切れになる。
 
-    8/24(月)から9/4(金)は暦日で11日だが、営業日では10日（＝期限ちょうど）。
-    ここを暦日で数えると、まだ期限内の銘柄を売れと言ってしまう。
+    8/24(月)から9/4(金)は暦日で11日だが、営業日では9日でまだ期限内。
+    ここを暦日で数えると、期限内の銘柄を売れと言ってしまう。
     """
     positions = [
         {"symbol": "1111.T", "bucket": "回転", "opened_at": date(2026, 8, 24)},
     ]
     assert find_expired(positions, today=date(2026, 9, 4)) == []
+
+
+def test_expired_is_exactly_at_the_deadline_not_one_day_after():
+    """期限ちょうどの日に降りること（1日ずれると、ルール文書と食い違う）。
+
+    8/24(月)を起点に、9/4(金)は9営業日で期限内、9/7(月)が10営業日で期限。
+    """
+    positions = [
+        {"symbol": "1111.T", "bucket": "回転", "opened_at": date(2026, 8, 24)},
+    ]
+    assert find_expired(positions, today=date(2026, 9, 4)) == []      # 9営業日
+    assert len(find_expired(positions, today=date(2026, 9, 7))) == 1  # 10営業日
 
 
 def test_summarize_lists_expired_positions_alongside_the_hits():

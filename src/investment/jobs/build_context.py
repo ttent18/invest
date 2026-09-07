@@ -160,13 +160,20 @@ def _max_entry_price(max_quantity: int, limit: float) -> float:
 def _slots_used(positions: list[dict]) -> dict[str, int]:
     """枠ごとに、いま何銘柄を持っているかを数える。
 
-    保有に枠の記録が無い場合（計画1では保有を記録していないため、当面は
-    起こらない）は「じっくり枠」として数える。黙って0にすると、
-    枠が空いていないのに空いていると伝えてしまうため。
+    保有に枠の記録が無い場合や、知らない枠の名前だった場合は
+    「じっくり枠」として数える（計画1では保有を記録していないため、当面は
+    起こらない）。黙って0にすると、枠が空いていないのに空いていると
+    伝えてしまうため。
     """
+    known = {b.name for b in BUCKETS}
     used: dict[str, int] = {}
     for p in positions:
-        name = p.get("bucket") or BUCKETS[0].name
+        name = p.get("bucket")
+        # 記録が無い場合も、知らない名前だった場合も、最初の枠に数える。
+        # 知らない名前のまま数えると assemble 側が読まないキーに入り、
+        # 「数えたつもりで数え落とす」という、いちばん避けたい形になる。
+        if name not in known:
+            name = BUCKETS[0].name
         used[name] = used.get(name, 0) + 1
     return used
 
@@ -182,6 +189,12 @@ def assemble(
     """AIに渡す情報をまとめる。ここでは外部アクセスを一切しない。"""
     limit = settings.total_capital * settings.max_position_pct
     used = _slots_used(positions)
+    # 枠ごとの空きを足すと、全体の残り枠を超えることがある。
+    # 例: 3銘柄すべて回転枠 → 回転0・じっくり2 で合計2だが、全体の残りは1。
+    # そのまま渡すと、AIが1回の判断で2件買う提案を出し、
+    # どちらも検証を通ってしまう（検証は1件ずつ同じ context を見るため）。
+    # 全体の残りで頭打ちにする。
+    remaining = max(0, MAX_POSITIONS - len(positions))
     return {
         "is_virtual": True,
         "rule_version": RULE_VERSION,
@@ -211,7 +224,7 @@ def assemble(
                 "max_holding_days": b.max_holding_days,
                 "slots": b.slots,
                 "used": used.get(b.name, 0),
-                "free": max(0, b.slots - used.get(b.name, 0)),
+                "free": min(remaining, max(0, b.slots - used.get(b.name, 0))),
             }
             for b in BUCKETS
         ],

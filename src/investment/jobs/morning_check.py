@@ -85,7 +85,9 @@ def find_expired(positions: list[dict], today: date) -> list[dict]:
             continue
         opened = _opened_date(p["opened_at"], today)
         elapsed = _business_days_between(opened, today)
-        if elapsed > bucket.max_holding_days:
+        # 「10営業日で手仕舞い」なので、ちょうど10営業日たった日に降りる。
+        # > にすると11営業日目まで持つことになり、ルール文書と1日ずれる。
+        if elapsed >= bucket.max_holding_days:
             expired.append({
                 "symbol": p["symbol"],
                 "bucket": bucket.name,
@@ -175,8 +177,8 @@ def summarize_result(
             f"（{e['business_days']}営業日経過 / 期限{e['limit']}営業日）。"
             f"値動きに関係なく、降りて枠を空けてください"
         )
-    if lines:
-        lines.insert(0, f"次の {len(lines)} 件は保有の期限を過ぎています:")
+    if expired:
+        lines.insert(0, f"次の {len(expired)} 件は保有の期限を過ぎています:")
         lines.append("")
 
     if hits:

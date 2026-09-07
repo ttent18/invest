@@ -134,3 +134,32 @@ def test_migrations_reject_an_unknown_bucket_name(conn):
                     'x', 'y', 'mid', 'z', 'なんとなく', 'v3', 'journal/x.md')
             """
         )
+
+
+def test_every_bucket_defined_in_the_code_can_actually_be_saved(conn):
+    """コードで定義した枠が、データベースにも保存できること。
+
+    枠の名前はコード（config.BUCKETS）とマイグレーションの CHECK 制約の
+    2箇所にある。片方だけ増やすと、検証は通るのに保存で落ちて、
+    そのバッチの正当な提案まで道連れになる。
+    """
+    from investment.config import BUCKETS
+
+    for i, b in enumerate(BUCKETS):
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO proposals
+                    (created_at, symbol, action, quantity, entry_price, take_profit,
+                     stop_loss, required_win_rate, rationale, scenario, confidence,
+                     strategy_tag, bucket, rule_version, journal_path)
+                VALUES (NOW(), %s, 'buy', 100, 1200, 1464, 1104, 0.2667,
+                        'x', 'y', 'mid', 'z', %s, 'v3', 'journal/x.md')
+                """,
+                (f"{1000 + i}.T", b.name),
+            )
+    conn.commit()
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT bucket FROM proposals ORDER BY id")
+        assert [r["bucket"] for r in cur.fetchall()] == [b.name for b in BUCKETS]

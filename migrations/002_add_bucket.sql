@@ -12,16 +12,20 @@ ALTER TABLE positions ADD COLUMN IF NOT EXISTS bucket TEXT;
 UPDATE positions SET bucket = 'じっくり' WHERE bucket IS NULL;
 
 -- 制約は値を埋めたあとで付ける。
--- DO ブロックにしているのは、ALTER TABLE ... ADD CONSTRAINT に
--- IF NOT EXISTS が無く、2回目の実行で失敗してしまうため
--- （マイグレーションは何度実行しても安全である必要がある）。
-DO $$
-BEGIN
-    ALTER TABLE proposals ALTER COLUMN bucket SET NOT NULL;
-    ALTER TABLE positions ALTER COLUMN bucket SET NOT NULL;
-EXCEPTION WHEN OTHERS THEN NULL;
-END $$;
+--
+-- SET NOT NULL は何度実行しても安全（2回目は何もしない）ので、そのまま書く。
+-- 以前はここも例外を握りつぶす DO ブロックに入れていたが、それをやると
+-- ロック待ちや権限の問題で NOT NULL が付かなかったときに、何のエラーも
+-- 出ないまま列が NULL 許容のまま残る。しかも下の CHECK 制約は NULL を
+-- 弾かない（NULL との比較は偽ではなく NULL になるため）ので、
+-- 枠の記録が無い行が黙って溜まり、枠ごとの成績比較という v3 の目的が
+-- 果たせなくなる。失敗したら失敗として見えるようにする。
+ALTER TABLE proposals ALTER COLUMN bucket SET NOT NULL;
+ALTER TABLE positions ALTER COLUMN bucket SET NOT NULL;
 
+-- 一方 ADD CONSTRAINT には IF NOT EXISTS が無く、2回目の実行で必ず失敗する。
+-- こちらは「既にある」場合だけを捕まえる（duplicate_object のみ。
+-- それ以外のエラーはそのまま外へ出す）。
 DO $$
 BEGIN
     ALTER TABLE proposals ADD CONSTRAINT proposals_bucket_check

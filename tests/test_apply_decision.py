@@ -181,7 +181,7 @@ def good_sell(**overrides) -> dict:
 
 def test_accepts_sell_of_exact_held_quantity():
     # 境界: 保有株数ちょうどの売りは通る
-    ctx = dict(CTX, positions=[{"symbol": "3993.T", "quantity": 100}])
+    ctx = dict(CTX, positions=[{"symbol": "3993.T", "quantity": 100, "bucket": "じっくり"}])
     assert validate(good_sell(quantity=100), ctx, SETTINGS) == []
 
 
@@ -192,7 +192,7 @@ def test_rejects_sell_of_symbol_not_held():
 
 
 def test_rejects_sell_exceeding_held_quantity():
-    ctx = dict(CTX, positions=[{"symbol": "3993.T", "quantity": 100}])
+    ctx = dict(CTX, positions=[{"symbol": "3993.T", "quantity": 100, "bucket": "じっくり"}])
     errors = validate(good_sell(quantity=200), ctx, SETTINGS)
     # 却下メッセージに保有株数(100)と売却しようとした株数(200)の両方が含まれる
     assert any("100" in e and "200" in e for e in errors)
@@ -579,7 +579,7 @@ def test_rejects_partial_sell_that_is_not_a_multiple_of_the_lot_size():
 
 def test_accepts_partial_sell_of_a_whole_number_of_lots():
     """300株保有のうち100株だけ売るのは正当。"""
-    ctx = dict(CTX, positions=[{"symbol": "3993.T", "quantity": 300}])
+    ctx = dict(CTX, positions=[{"symbol": "3993.T", "quantity": 300, "bucket": "じっくり"}])
     assert validate(good_sell(quantity=100), ctx, SETTINGS) == []
 
 
@@ -589,7 +589,7 @@ def test_accepts_selling_the_entire_holding_even_if_it_is_not_a_whole_lot():
     端株（株式分割などで生じる100株未満の保有）は、まとめてなら売却できる。
     「全部売る」を却下すると、持ち続けるしかなくなってしまう。
     """
-    ctx = dict(CTX, positions=[{"symbol": "3993.T", "quantity": 37}])
+    ctx = dict(CTX, positions=[{"symbol": "3993.T", "quantity": 37, "bucket": "じっくり"}])
     assert validate(good_sell(quantity=37), ctx, SETTINGS) == []
 
 
@@ -736,3 +736,69 @@ def test_rejects_a_buy_when_the_bucket_has_no_free_slot():
     assert any("じっくり" in e and "空き" in e for e in errors), errors
     # 回転枠なら通る
     assert validate(_fast(), ctx, SETTINGS) == []
+
+
+def test_the_bucket_rules_come_from_the_code_not_from_the_context_file():
+    """利確・損切りの幅は、AIが書き換えられるファイルではなくコードから取ること。
+
+    context.json は AI が Write できる場所にある。そこに書かれた枠の幅で
+    検証すると、AIが自分の数字を自分の数字で検証することになり、
+    「AIの出力を信用しない」というこの仕組みの前提が崩れる。
+    枠の幅は investment.config.BUCKETS が唯一の出所である。
+    """
+    # context.json 側の枠の幅が改ざんされていても、コード側の幅で判定する
+    ctx = _ctx_with_buckets()
+    ctx["buckets"] = [
+        {**ctx["buckets"][0], "take_profit_pct": 0.50, "stop_loss_pct": 0.01},
+        ctx["buckets"][1],
+    ]
+    # 改ざんされた幅（+50%/-1%）に沿った提案は、却下されなければならない
+    d = _patient(take_profit=1800.0, stop_loss=1188.0)
+    errors = validate(d, ctx, SETTINGS)
+    assert any("take_profit" in e for e in errors), errors
+
+    # 本来の幅（+22%/-8%）に沿った提案は通る
+    assert validate(_patient(), ctx, SETTINGS) == []
+
+
+def test_the_free_slot_count_still_comes_from_the_context():
+    """空き枠の数は、そのときの保有状況なのでコンテキストから取る。"""
+    ctx = _ctx_with_buckets()
+    ctx["buckets"] = [{**ctx["buckets"][0], "used": 2, "free": 0}, ctx["buckets"][1]]
+    assert any("空き" in e for e in validate(_patient(), ctx, SETTINGS))
+
+
+# --- 売りに bucket を求めない（保有から決まるため） --------------------------
+
+
+def test_sell_does_not_require_the_ai_to_state_the_bucket():
+    """売りの枠は、その銘柄を買ったときの枠で決まっている。AIに書かせない。
+
+    AIに書かせると、保有と違う枠を書いたり、書き忘れたりする。
+    どちらも保有側に正しい答えがあるのだから、そちらから取る。
+    """
+    ctx = dict(CTX, positions=[{"symbol": "3993.T", "quantity": 100, "bucket": "回転"}])
+    d = good_sell(quantity=100)
+    del d["bucket"]
+
+    assert validate(d, ctx, SETTINGS) == []
+    # 検証の副作用として、保有の枠が decision に入る（保存時に使う）
+    assert d["bucket"] == "回転"
+
+
+def test_sell_overwrites_a_bucket_the_ai_guessed_wrong():
+    ctx = dict(CTX, positions=[{"symbol": "3993.T", "quantity": 100, "bucket": "回転"}])
+    d = good_sell(quantity=100, bucket="じっくり")   # AIの書いた枠は間違い
+
+    assert validate(d, ctx, SETTINGS) == []
+    assert d["bucket"] == "回転"   # 保有側が正
+
+
+def test_sell_is_rejected_when_the_position_has_no_bucket():
+    """保有に枠の記録が無ければ却下する。勝手に決めない。
+
+    枠が分からないまま保存すると、枠ごとの成績集計から黙って漏れる。
+    """
+    ctx = dict(CTX, positions=[{"symbol": "3993.T", "quantity": 100}])
+    errors = validate(good_sell(quantity=100), ctx, SETTINGS)
+    assert any("枠" in e for e in errors), errors

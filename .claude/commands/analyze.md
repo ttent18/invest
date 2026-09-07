@@ -115,6 +115,9 @@ allowed-tools: Read, Write, WebSearch, WebFetch
 
 - **売りは `positions`（現在の保有）にある銘柄しか出せない。** 保有していない
   銘柄を売る判断は後段で却下される
+- **売りに `bucket` は書かなくてよい。** どの枠かは、その銘柄を買ったときに
+  決まっている。プログラムが保有から自動で埋める（書いても保有側の値で
+  上書きされる）
 - **売却する `quantity` は、その銘柄の保有株数を超えてはならない。** 超える値は
   後段で却下される。**`quantity` は1以上の整数でなければならない**
   （0、負の数、端数は却下される）
@@ -164,6 +167,7 @@ allowed-tools: Read, Write, WebSearch, WebFetch
 - 買いの `quantity` は候補の `max_quantity` を超えず、`lot_size` の倍数であること
   （日本株は100株単位）
 - 買いの `bucket` は `buckets` にある名前のいずれかで、その枠の `free` が1以上であること
+  （売りには不要。保有から自動で決まる）
 - `take_profit` と `stop_loss` が、選んだ枠の決めた幅と一致していること
 - 売りの `quantity` は保有株数を超えないこと
 - `rationale` / `scenario` は空文字（空白のみを含む）であってはならない
