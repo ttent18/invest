@@ -332,6 +332,57 @@ def test_sell_uses_the_recorded_time_for_the_trade_but_not_for_holding_days(conn
     assert executed_at == expected
 
 
+def test_holding_days_is_counted_from_the_traded_dates_not_from_today(conn):
+    """保有日数（trades.holding_days）は、申告した売買日時から数えること。
+
+    保有日数は「じっくり枠」「回転枠」のどちらが向いているかを実測する
+    ための材料であり、正確でなければ意味がない。以前は run() の
+    today（ジョブが実行された日）を保有日数の終点として使っていたが、
+    今は売った申告の売買日時（traded_at、無ければ recorded_at）から
+    終点を出す。
+
+    today を売買日からわざと大きく離す（2027-06-01）。近い日にすると、
+    実装が今も today を使っていたとしても、たまたま同じ日数になって
+    しまい、この確認の意味がなくなるため。
+    """
+    pid = _proposal(conn, "1111.T", "じっくり")
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO fills (proposal_id, symbol, side, quantity, price, currency,
+                               traded_at)
+            VALUES (%s, '1111.T', 'buy', 100, 900, 'JPY',
+                    TIMESTAMPTZ '2026-09-01 10:00:00+09')
+            """,
+            (pid,),
+        )
+    conn.commit()
+    run(conn, today=date(2026, 9, 8))
+
+    pid_sell = _proposal(conn, "1111.T", "じっくり", action="sell")
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO fills (proposal_id, symbol, side, quantity, price, currency,
+                               traded_at)
+            VALUES (%s, '1111.T', 'sell', 100, 1100, 'JPY',
+                    TIMESTAMPTZ '2026-09-11 10:00:00+09')
+            """,
+            (pid_sell,),
+        )
+    conn.commit()
+
+    run(conn, today=date(2027, 6, 1))
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT holding_days FROM trades WHERE symbol = '1111.T' AND side = 'sell'"
+        )
+        holding_days = cur.fetchone()["holding_days"]
+
+    assert holding_days == 10
+
+
 def test_a_fill_that_cannot_be_applied_is_kept_with_its_reason(conn):
     """反映できない申告を黙って消さないこと。"""
     fid = _fill(conn, symbol="9999.T", side="sell", quantity=100, price=900)

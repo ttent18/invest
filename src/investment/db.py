@@ -237,7 +237,7 @@ def save_fill_result(
     cash_delta: float,
     trade: dict,
     currency: str,
-    recorded_at,
+    happened_at,
     proposal_id: int | None = None,
 ) -> None:
     """1件の申告の反映を、まとめて1つのトランザクションで書き込む。
@@ -248,7 +248,7 @@ def save_fill_result(
 
     position が None なら、その銘柄の保有を削除する（全部売った場合）。
 
-    recorded_at には、実際に売買した日時（fills.traded_at）が分かっていれば
+    happened_at には、実際に売買した日時（fills.traded_at）が分かっていれば
     それを、無ければ申告した時刻（fills.recorded_at）を呼び出し側が選んで渡す。
     取引の executed_at と保有の opened_at にはこれを使い、ジョブが実行された
     時刻（NOW()）は使わない。月曜の場中に買ってもジョブは翌朝に実行されるため、
@@ -271,7 +271,7 @@ def save_fill_result(
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
-                recorded_at, trade["symbol"], trade["side"], trade["quantity"],
+                happened_at, trade["symbol"], trade["side"], trade["quantity"],
                 trade["price"], trade["currency"], trade["fee"], trade["bucket"],
                 trade["realized_pnl"], trade["holding_days"],
             ),
@@ -298,7 +298,7 @@ def save_fill_result(
                 """,
                 (
                     position.symbol, position.quantity, position.avg_price, currency,
-                    position.take_profit, position.stop_loss, recorded_at,
+                    position.take_profit, position.stop_loss, happened_at,
                     position.bucket,
                 ),
             )
