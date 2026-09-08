@@ -6,7 +6,14 @@ import pytest
 
 from investment.config import SETTINGS
 from investment.db import apply_migrations, connect
-from investment.jobs.apply_decision import enrich, insert_proposals, main, process, validate
+from investment.jobs.apply_decision import (
+    _candidates_heading,
+    enrich,
+    insert_proposals,
+    main,
+    process,
+    validate,
+)
 
 CTX = {
     "can_open_new": True,
@@ -924,9 +931,11 @@ def test_process_rejects_the_third_buy_into_a_two_slot_bucket(tmp_path):
         patch("investment.jobs.apply_decision.insert_proposals") as insert,
         patch("investment.jobs.apply_decision.record_rejections") as reject,
     ):
-        accepted, rejected = process(None, ctx, decisions, journal, SETTINGS, capital=550_000.0)
+        accepted, rejected, buy_count, sell_count = process(
+            None, ctx, decisions, journal, SETTINGS, capital=550_000.0
+        )
 
-    assert (accepted, rejected) == (2, 1)
+    assert (accepted, rejected, buy_count, sell_count) == (2, 1, 2, 0)
     assert [d["symbol"] for d in insert.call_args.args[1]] == ["1.T", "2.T"]
     # 却下された事実は data_gaps に残る（黙って捨てない）
     reject.assert_called_once()
@@ -949,9 +958,11 @@ def test_process_counts_the_two_buckets_separately(tmp_path):
         patch("investment.jobs.apply_decision.insert_proposals"),
         patch("investment.jobs.apply_decision.record_rejections"),
     ):
-        accepted, rejected = process(None, ctx, decisions, journal, SETTINGS, capital=550_000.0)
+        accepted, rejected, buy_count, sell_count = process(
+            None, ctx, decisions, journal, SETTINGS, capital=550_000.0
+        )
 
-    assert (accepted, rejected) == (4, 0)
+    assert (accepted, rejected, buy_count, sell_count) == (4, 0, 4, 0)
 
 
 def test_process_records_a_sell_whose_bucket_disagreed_with_the_holding(tmp_path):
@@ -969,11 +980,11 @@ def test_process_records_a_sell_whose_bucket_disagreed_with_the_holding(tmp_path
         patch("investment.jobs.apply_decision.insert_proposals") as insert,
         patch("investment.jobs.apply_decision.record_rejections") as record,
     ):
-        accepted, rejected = process(
+        accepted, rejected, buy_count, sell_count = process(
             None, ctx, [d], _journal_for(tmp_path, ["3993.T"]), SETTINGS, capital=550_000.0
         )
 
-    assert (accepted, rejected) == (1, 0)          # 却下はしない
+    assert (accepted, rejected, buy_count, sell_count) == (1, 0, 0, 1)  # 却下はしない
     assert insert.call_args.args[1][0]["bucket"] == "回転"   # 保有側で保存
     record.assert_called_once()                     # 食い違いは記録される
     assert "回転" in record.call_args.args[1][0][1][0]
@@ -1056,11 +1067,11 @@ def test_process_records_a_gap_when_the_journal_is_missing(tmp_path):
         patch("investment.jobs.apply_decision.record_rejections"),
         patch("investment.jobs.apply_decision.record_gap") as gap,
     ):
-        accepted, rejected = process(
+        accepted, rejected, buy_count, sell_count = process(
             None, ctx, [_patient(symbol="1.T")], str(tmp_path / "ない.md"), SETTINGS, capital=550_000.0
         )
 
-    assert (accepted, rejected) == (1, 0)   # 判断そのものは保存する
+    assert (accepted, rejected, buy_count, sell_count) == (1, 0, 1, 0)   # 判断そのものは保存する
     gap.assert_called_once()
     assert gap.call_args.kwargs["scope"] == "journal:missing"
 
@@ -1131,13 +1142,69 @@ def test_main_notifies_when_there_are_proposals(tmp_path, monkeypatch):
     with (
         patch("investment.jobs.apply_decision.connect"),
         patch("investment.jobs.apply_decision.select_capital", return_value=550_000.0),
-        patch("investment.jobs.apply_decision.process", return_value=(1, 0)),
+        patch("investment.jobs.apply_decision.process", return_value=(1, 0, 1, 0)),
         patch("investment.jobs.apply_decision.notify_send") as notify,
     ):
         main()
 
     notify.assert_called_once()
     assert "1" in notify.call_args.kwargs["title"]
+
+
+# --- 通知の見出しは買い・売りの内訳を言うこと（最終レビューの指摘） ---------
+# accepted には売りの提案も含まれるのに、見出しが「買う候補」一本だと
+# 売りしかない日でも実態と違う見出しになる。
+
+
+def test_main_notification_title_mentions_sell_when_only_sells_are_accepted(
+    tmp_path, monkeypatch
+):
+    """売りの提案しか無い日は、見出しにも『買う』ではなく『売る』と出ること。"""
+    monkeypatch.chdir(tmp_path)
+    _write_build_files(tmp_path, [{"symbol": "3993.T"}])
+
+    with (
+        patch("investment.jobs.apply_decision.connect"),
+        patch("investment.jobs.apply_decision.select_capital", return_value=550_000.0),
+        patch("investment.jobs.apply_decision.process", return_value=(1, 0, 0, 1)),
+        patch("investment.jobs.apply_decision.notify_send") as notify,
+    ):
+        main()
+
+    title = notify.call_args.kwargs["title"]
+    assert "売る候補" in title
+    assert "買う" not in title
+
+
+def test_main_notification_title_mentions_both_when_buys_and_sells_are_accepted(
+    tmp_path, monkeypatch
+):
+    """買いと売りが両方採用された日は、両方の件数を見出しに出すこと。"""
+    monkeypatch.chdir(tmp_path)
+    _write_build_files(tmp_path, [{"symbol": "3993.T"}, {"symbol": "1111.T"}])
+
+    with (
+        patch("investment.jobs.apply_decision.connect"),
+        patch("investment.jobs.apply_decision.select_capital", return_value=550_000.0),
+        patch("investment.jobs.apply_decision.process", return_value=(3, 0, 2, 1)),
+        patch("investment.jobs.apply_decision.notify_send") as notify,
+    ):
+        main()
+
+    title = notify.call_args.kwargs["title"]
+    assert "買う候補" in title and "2" in title
+    assert "売る候補" in title and "1" in title
+
+
+def test_candidates_heading_says_nothing_about_the_zero_side():
+    """0件の側は見出しに出さない。"""
+    assert "売る" not in _candidates_heading(buy_count=2, sell_count=0)
+    assert "買う" not in _candidates_heading(buy_count=0, sell_count=1)
+
+
+def test_candidates_heading_lists_both_when_both_are_nonzero():
+    heading = _candidates_heading(buy_count=2, sell_count=1)
+    assert heading == "買う候補が 2 件、売る候補が 1 件あります"
 
 
 # --- 総資金が0円のとき、誰も気づけないまま止まらないこと（指摘2） -----------
@@ -1181,7 +1248,7 @@ def test_main_does_not_notify_when_there_are_no_proposals(tmp_path, monkeypatch)
     with (
         patch("investment.jobs.apply_decision.connect"),
         patch("investment.jobs.apply_decision.select_capital", return_value=550_000.0),
-        patch("investment.jobs.apply_decision.process", return_value=(0, 0)),
+        patch("investment.jobs.apply_decision.process", return_value=(0, 0, 0, 0)),
         patch("investment.jobs.apply_decision.notify_send") as notify,
     ):
         main()

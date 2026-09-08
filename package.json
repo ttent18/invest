@@ -1,0 +1,8 @@
+{
+  "name": "investment-pwa",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "vitest run" },
+  "dependencies": { "@neondatabase/serverless": "^1.0.0" },
+  "devDependencies": { "vitest": "^3.0.0" }
+}

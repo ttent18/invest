@@ -16,11 +16,36 @@ from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from investment.config import bucket_by_name
-from investment.db import connect, record_gap, select_positions
-from investment.market import MarketDataError, fetch_range
+from investment.db import connect, record_gap, save_last_prices, select_positions
+from investment.market import MarketDataError, fetch_last_price, fetch_range
 from investment.notify import send as notify_send
 
 JST = ZoneInfo("Asia/Tokyo")  # 「今日」は日本時間で決める（GitHub Actions は UTC で動くため）
+
+
+def _record_gap_safely(conn, scope: str, detail: str) -> None:
+    """record_gap（「取れなかった事実を残す」だけの補助）自体の失敗で、
+    本体（損切り・利確への到達の確認と通知）を巻き添えにしない。
+
+    record_gap はもともと「値動きが取れなかった」等の“補助的な事実”を残す
+    ためだけの処理で、それ自体が失敗する（データベース接続の問題など）と、
+    run() が例外で止まり、まだ判定していない残りの保有の確認や、既に
+    見つかっている損切り到達の通知まで丸ごと飛ばなくなってしまう。
+    これはこのプロジェクトで4回目の同じ型の欠陥（notify.send → 分析全体、
+    1件の申告の失敗 → 残り全部、株価の保存の失敗 → 損切り通知、
+    そして今回は record_gap 自体 → 損切り通知、を巻き添えにしていた）。
+
+    ここは「本体を絶対に落とさない」ことが要件なので、想定外の例外も
+    含めて広く受け止める。狭く捕まえる利点（想定外の型に気づけること）は
+    失われるが、その失敗を record_gap に書くことはできない（それ自体が
+    失敗しているため）ので、代わりにログ（標準出力）に必ず残すことで
+    黙って消えないようにする。
+    """
+    try:
+        record_gap(conn, scope=scope, detail=detail)
+    except Exception as exc:  # noqa: BLE001 - 理由は上のコメントを参照
+        print(f"gap を記録できませんでした（{scope}）: {exc}")
+
 
 # 遡る暦日数。営業日カレンダー（祝日データ）は持ち込まず、暦日で一定期間を遡る。
 # 日本には3連休（土日+祝日、祝日+土日、祝日+土日+祝日）が多くあり、
@@ -132,8 +157,14 @@ def run(positions: list[dict], conn, today: date) -> tuple[list[dict], int, int]
     「判定対象になった件数」(attempted) は、確認すべき期間がある銘柄の数。
     まだ確認すべき期間がない銘柄（今日開いたばかりなど）は含めない
     （取得を試みてすらいないので、失敗としてもカウントしない）。
+
+    値動きの取得に成功した銘柄については、画面に含み損益を出すための終値も
+    ついでに取って保存する（Cloudflare 側からは株価を取れないため、
+    ここで見た値を保存しておく）。終値の取得に失敗しても、損切り・利確に
+    到達した可能性の判定は続ける（そちらのほうが重要なため）。
     """
     ranges: dict[str, tuple[float, float]] = {}
+    last_prices: dict[str, float] = {}
     failed = 0
     attempted = 0
     for p in positions:
@@ -147,9 +178,31 @@ def run(positions: list[dict], conn, today: date) -> tuple[list[dict], int, int]
             ranges[p["symbol"]] = fetch_range(p["symbol"], start, end)
         except MarketDataError as exc:
             failed += 1
-            record_gap(conn, scope=f"daily_range:{p['symbol']}", detail=str(exc))
+            _record_gap_safely(conn, scope=f"daily_range:{p['symbol']}", detail=str(exc))
+            continue
+
+        # 値動きの取得に成功した銘柄について、画面に出す用の終値も取る。
+        # ここが失敗しても、売れた可能性の判定は続ける（通知のほうが重要）。
+        try:
+            last_prices[p["symbol"]] = fetch_last_price(p["symbol"])
+        except MarketDataError:
+            pass
 
     hits = detect_hits(positions, ranges)
+
+    # 株価の保存に失敗しても、損切り・利確への到達を知らせるほうを止めない。
+    # 保存できたかどうかは画面の見た目の話で、通知は「あなたが動く必要がある」
+    # という知らせ。軽いほうの失敗で重いほうを巻き添えにしない。
+    # 失敗した事実は記録に残すので、黙って消えることはない。
+    try:
+        save_last_prices(conn, last_prices)
+    except Exception as exc:  # noqa: BLE001 - 理由は上のコメントを参照
+        _record_gap_safely(
+            conn,
+            scope="price:save_failed",
+            detail=f"最後に見た株価を保存できませんでした: {exc}",
+        )
+
     return hits, failed, attempted
 
 
@@ -249,7 +302,12 @@ def main() -> int:
                 conn,
                 title="SBIで持ち株を確認してください",
                 body=" ／ ".join(parts),
-                url="/holdings",
+                # 画面のファイル名そのもの。Cloudflare Pages は拡張子なしでも
+                # 開けるが、実在するファイル名を指しておくほうが、
+                # ホスティングの設定が変わっても壊れない。
+                # 通知をタップして開けないと、損切りの知らせが届いても
+                # 何も見られないことになる。
+                url="/holdings.html",
             )
     return code
 

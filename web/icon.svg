@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- ホーム画面アイコンの元データ。濃い背景に白い上向きの矢印。
+       iOS はこの SVG を apple-touch-icon として扱えないため、
+       同じ図形を web/icon-180.png（と icon-512.png）として別途 PNG で用意している。
+       図形を変えるときはこのファイルと、PNG を作り直すスクリプトの
+       両方を直すこと（手順は task-9-report.md 参照）。 -->
+  <rect width="512" height="512" rx="96" fill="#0f1115" />
+  <rect x="228" y="232" width="56" height="160" rx="28" fill="#ffffff" />
+  <polygon points="256,120 176,232 336,232" fill="#ffffff" />
+</svg>

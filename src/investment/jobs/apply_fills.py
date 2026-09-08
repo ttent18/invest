@@ -22,6 +22,7 @@ from investment.db import (
     select_unapplied_fills,
 )
 from investment.fills import FillError, Position, apply_buy, apply_sell
+from investment.notify import send as notify_send
 
 JST = ZoneInfo("Asia/Tokyo")
 
@@ -59,6 +60,13 @@ def run(conn, today: date) -> tuple[int, int]:
     """未反映の申告を古い順に反映する。戻り値は (反映できた件数, できなかった件数)。
 
     1件の失敗で全体を止めない。失敗した申告は消さず、理由を残す。
+
+    today はこの関数の中では使わない。保有日数の終点は、以前はジョブが
+    走った日（today）を使っていたが、それだと売った日が翌朝にずれる
+    （計画2-A の最終レビューで指摘済み）。いまは申告ごとの売買日時
+    （traded_at か recorded_at）から終点を出す。引数として残しているのは、
+    main() と既存テストの呼び出し側をこのタスクの範囲外まで書き換えず、
+    呼び出し方を変えずに済ませるため。
     """
     ok = failed = 0
     for row in select_unapplied_fills(conn):
@@ -73,6 +81,14 @@ def run(conn, today: date) -> tuple[int, int]:
         existing, opened_at = _position_of(conn, fill["symbol"])
 
         try:
+            # 利用者が実際に売買した日時があればそれを、無ければ申告した時刻を
+            # 使う。ジョブが走った時刻を使うと、翌朝に反映されるぶん常にずれる。
+            # この計算も try の中に入れる。ここで例外が起きると、1件の申告の
+            # 失敗のはずが、下の except に届かずに run() 全体を止めてしまい、
+            # まだ処理していない残りの申告まで巻き添えにするため。
+            happened_at = row["traded_at"] or row["recorded_at"]
+            happened_on = happened_at.astimezone(JST).date()
+
             # 申告が提案に紐づいている場合、その提案がこの申告と本当に
             # 対応しているかをここで確かめる。確かめないと2つの事故が
             # 起きる。
@@ -112,7 +128,7 @@ def run(conn, today: date) -> tuple[int, int]:
                 cash = select_cash(conn).get(fill["currency"], 0.0)
                 result = apply_buy(existing, fill, rule, cash)
             else:
-                result = apply_sell(existing, fill, opened_at, today)
+                result = apply_sell(existing, fill, opened_at, happened_on)
 
             # 申告に提案が紐づいていれば、同じトランザクションの中で
             # その提案も「実行した」（outcome = 'taken'）にする。買い・
@@ -128,24 +144,30 @@ def run(conn, today: date) -> tuple[int, int]:
                 result.cash_delta,
                 result.trade,
                 fill["currency"],
-                row["recorded_at"],
+                happened_at,
                 proposal_id=row["proposal_id"],
             )
-        except FillError as exc:
+        except Exception as exc:  # noqa: BLE001 - 理由は下のコメントを参照
+            # 想定外の例外も含めて捕まえる。1件の申告の失敗で、残りの申告と
+            # ワークフローの後続を道連れにしないため。狭く捕まえる利点
+            # （想定外の例外に気づける）は、apply_error に必ず理由を残すことで
+            # 代替している。notify.send と同じ考え方。
+            #
             # save_fill_result が現金の反映などに失敗して例外を出した場合、
             # そこまでに書いた取引・保有・提案の更新はまだコミットされて
             # いない。ここで rollback しないと、直後の mark_fill_failed の
             # commit がその未確定分もろとも確定させてしまい、「現金だけ
             # 動かない」という一番避けたい壊れ方になる。
-            conn.rollback()
             failed += 1
+            conn.rollback()
             mark_fill_failed(conn, row["id"], str(exc))
             print(f"反映できません #{row['id']} {fill['symbol']}: {exc}")
             continue
 
         ok += 1
+        side_label = "買い" if fill["side"] == "buy" else "売り"
         print(
-            f"反映しました #{row['id']} {fill['symbol']} {fill['side']} "
+            f"反映しました #{row['id']} {fill['symbol']} {side_label} "
             f"{fill['quantity']}株 × {fill['price']:,.0f}円"
         )
 
@@ -162,6 +184,18 @@ def main() -> int:
     # 反映できなかったものがあっても、ジョブ自体は成功とする。
     # 理由は fills に残っており、画面に出るため。ここで失敗にすると、
     # 利用者の入力ミス1件でワークフロー全体が赤くなる。
+
+    # 反映できなかった記録があることを利用者に届ける。これまでは
+    # fills.apply_error に溜まるだけで、ジョブは成功扱い・通知なしだった。
+    # 記録は残っていても、気づけなければ無いのと同じ。
+    if failed:
+        with connect() as conn:
+            notify_send(
+                conn,
+                title="記録できていない売買があります",
+                body=f"{failed} 件。画面を開いて内容を確かめてください",
+                url="/",
+            )
     return 0
 
 

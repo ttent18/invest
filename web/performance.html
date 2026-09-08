@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#0f1115" />
+    <title>収支</title>
+    <link rel="stylesheet" href="/app.css" />
+    <link rel="manifest" href="/manifest.json" />
+    <link rel="apple-touch-icon" href="/icon-180.png" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="投資" />
+  </head>
+  <body>
+    <noscript>
+      この画面を使うにはJavaScriptが必要です。iPhoneの「設定」からJavaScriptを有効にしてください。
+    </noscript>
+
+    <div class="app-container">
+      <div id="nav-root"></div>
+      <h1>収支</h1>
+      <div id="banner-root"></div>
+      <main id="main-root">
+        <div class="loading-state">読み込んでいます…</div>
+      </main>
+    </div>
+
+    <script type="module">
+      import {
+        loadState,
+        yen,
+        ratePct,
+        signedYen,
+        escapeHtml,
+        banner,
+        renderNav,
+        renderUnappliedBanner,
+      } from "/app.js";
+
+      // 各枠15件ずつ決着するまでは、勝率を比べても意味が薄い。
+      // rules/v3.md「次に見直すタイミング: 各枠の決着が15件ずつ溜まった
+      // とき。そこで勝率・平均保有日数・期限切れの件数を比較する」
+      // に合わせた数字で、**枠ごとに15件**（合計で15件ではない）。
+      // 少ない件数の勝率を見て「じっくりのほうが良い」と思い込むのを
+      // 防ぐための、この仕組みの中心的な約束。
+      const DECISION_THRESHOLD = 15;
+
+      // ---------------------------------------------------------------
+      // 現金・評価額・合計
+      // ---------------------------------------------------------------
+      function renderMoney(root, state) {
+        const card = document.createElement("div");
+        card.className = "card";
+        const h = document.createElement("h2");
+        h.textContent = "資産の状況";
+        card.appendChild(h);
+
+        const cashJpy = state.cash && typeof state.cash.JPY === "number" ? state.cash.JPY : null;
+        const capital = typeof state.capital === "number" ? state.capital : null;
+        // 「評価額」は保有の取得原価の合計（quantity × avg_price）。
+        // ここでは quantity と avg_price を掛け直すのではなく、すでに
+        // サーバー側で計算済みの2つの値（capital と cash.JPY）の引き算で
+        // 出す。capital の定義自体が「現金 + 取得原価の合計」であり、
+        // この引き算はその定義から必然的に導かれる値であって、新しく
+        // 積み上げ計算をしているのではない。こうしておけば
+        // 「現金＋評価額＝合計」が常に一致する（別々に計算すると、
+        // 端数や取りこぼしでずれる余地がある）。
+        //
+        // **この引き算が成り立つ根拠は、functions/api/state.js の
+        // onRequestGet にある capital のSQL1本だけ:**
+        //   (SELECT COALESCE(SUM(amount),0) FROM cash WHERE currency='JPY')
+        //   + (SELECT COALESCE(SUM(quantity*avg_price),0) FROM positions
+        //      WHERE currency='JPY')
+        // **そのSQLの定義が変わったら（例：外貨を足す、時価に変える）、
+        // ここは黙って間違った「評価額」を出す。必ずここも直すこと。**
+        const valuation = cashJpy !== null && capital !== null ? capital - cashJpy : null;
+
+        const rows = [
+          ["現金", yen(cashJpy)],
+          ["評価額", yen(valuation)],
+          ["合計", yen(capital)],
+        ];
+        for (const [label, value] of rows) {
+          const row = document.createElement("div");
+          row.className = "money-row";
+          row.innerHTML = `<div class="money-label">${label}</div><div class="money-value">${value}</div>`;
+          card.appendChild(row);
+        }
+
+        // 「初期資金から」の増減 = 最初に入金した額(initial_capital)から
+        // いまの合計(capital)がいくら増減したか。/api/state が
+        // profit_since_start としてすでに計算して返す
+        // （functions/_shared/state.js。capital - initial_capital の
+        // 引き算だけなので、画面側でやり直さない）。
+        const profitSinceStart = typeof state.profit_since_start === "number" ? state.profit_since_start : null;
+        const profitClass =
+          profitSinceStart !== null && profitSinceStart > 0
+            ? "figure-value-profit"
+            : profitSinceStart !== null && profitSinceStart < 0
+              ? "figure-value-loss"
+              : "";
+        const initialRow = document.createElement("div");
+        initialRow.className = "money-row";
+        initialRow.innerHTML = `<div class="money-label">初期資金から</div><div class="money-value ${profitClass}">${signedYen(profitSinceStart)}</div>`;
+        card.appendChild(initialRow);
+        const initialNote = document.createElement("p");
+        initialNote.className = "hint-text";
+        initialNote.textContent =
+          typeof state.initial_capital === "number"
+            ? `最初に入れた ${yen(state.initial_capital)} から、いまいくら増減したかです。`
+            : "初期資金の記録が出せなかったため、増減を出せません。";
+        card.appendChild(initialNote);
+
+        // 確定した損益 = 枠ごとの合計損益の合計。
+        // 枠ごとの合計損益（performance[].total_pnl）はサーバー側で
+        // SQLのSUMとして計算済みの値なので、ここでは2つの枠の値を
+        // 足すだけ（新しく損益を計算し直してはいない）。
+        //
+        // **その total_pnl は functions/api/state.js の onRequestGet に
+        // ある、この1本のSQLが出している:**
+        //   SELECT bucket, …, COALESCE(SUM(realized_pnl),0) AS total_pnl
+        //   FROM trades WHERE side='sell' AND bucket IS NOT NULL
+        //   GROUP BY bucket
+        // **このSQLの WHERE や GROUP BY が変わると（例：枠なしの取引も
+        // 数える、bucket が NULL の行が出る）、枠ごとの合計を足しても
+        // 全体の確定損益にならなくなる。そのときはここも直すこと。**
+        const performance = Array.isArray(state.performance) ? state.performance : [];
+        const hasAllTotals = performance.every((p) => typeof p.total_pnl === "number");
+        const realizedTotal =
+          performance.length > 0 && hasAllTotals ? performance.reduce((sum, p) => sum + p.total_pnl, 0) : null;
+        const realizedRow = document.createElement("div");
+        realizedRow.className = "money-row";
+        realizedRow.innerHTML = `<div class="money-label">確定した損益</div><div class="money-value">${yen(realizedTotal)}</div>`;
+        card.appendChild(realizedRow);
+
+        if (state.is_virtual) {
+          const note = document.createElement("p");
+          note.className = "hint-text";
+          note.textContent = "いまは仮の金額で検証している段階です（実際のお金はまだ動いていません）。";
+          card.appendChild(note);
+        }
+
+        root.appendChild(card);
+      }
+
+      // ---------------------------------------------------------------
+      // 枠ごとの成績
+      // ---------------------------------------------------------------
+      function renderBucketPerformance(root, state) {
+        const card = document.createElement("div");
+        card.className = "card";
+        const h = document.createElement("h2");
+        h.textContent = "枠ごとの成績";
+        card.appendChild(h);
+
+        const performance = Array.isArray(state.performance) ? state.performance : [];
+        // 表示の並び順（じっくり→回転）は、この画面の見せ方として
+        // 固定する。行の中身は /api/state が返した performance を
+        // bucket名で引くだけで、順番や値を作り直しはしない。
+        const order = ["じっくり", "回転"];
+        const byName = {};
+        for (const p of performance) {
+          byName[p.bucket] = p;
+        }
+        const buckets = order.map((name) => byName[name] || null);
+
+        // 決着が15件に届いていない枠が1つでもあれば、まだ比べられる
+        // 件数ではない。これがこの仕組みの中心的な約束（rules/v3.md）。
+        const isEnough = (p) => p && typeof p.closed === "number" && p.closed >= DECISION_THRESHOLD;
+        const notEnough = buckets.some((p) => !isEnough(p));
+
+        // **警告は表より先に出す。** 66.7% と 33.3% を見て「効いている」と
+        // 読んだあとに警告に行き当たるのでは、警告の目的（少ない件数の
+        // 勝率を成績として読ませない）が並び順で打ち消されてしまう。
+        if (notEnough) {
+          const warn = document.createElement("div");
+          warn.className = "banner banner-danger";
+          warn.textContent = `まだ判断できる件数ではありません。\n各枠${DECISION_THRESHOLD}件ずつ決着してから比べてください。`;
+          card.appendChild(warn);
+        }
+
+        const table = document.createElement("table");
+        table.className = "perf-table";
+
+        const rows = [
+          ["決着した数", (p) => (p ? `${p.closed}件` : "—")],
+          // **件数が足りない枠は、勝率の数字そのものを出さない。**
+          // 3件中2勝の「66.7%」は、たまたま2勝しただけでも出る数字で、
+          // 成績として読める値ではない。目に入れば必ず比べてしまうので、
+          // 「—」にして見せない（黙って0にするのではなく、まだ出せない
+          // ことを言葉で書く）。
+          [
+            "勝率",
+            (p) =>
+              isEnough(p)
+                ? ratePct(p.win_rate)
+                : '—<div class="perf-cell-note">まだ件数が<br>足りません</div>',
+          ],
+          ["損益トントン", (p) => (p ? ratePct(p.breakeven_win_rate) : "—")],
+          ["平均保有日数", (p) => (p && p.avg_holding_days !== null ? `${p.avg_holding_days.toFixed(1)}日` : "—")],
+          // rules/v3.md「次に見直すタイミング: 各枠の決着が15件ずつ溜まった
+          // とき。そこで勝率・平均保有日数・期限切れの件数を比較する」の
+          // 3つ目。/api/state が expired_count として返す
+          // （functions/_shared/state.js）ので、ここでは数え直さない。
+          //
+          // **期限の無いじっくり枠は null で来る。0 と出さないこと。**
+          // 0 は「期限切れが一度も無かった」という事実だが、じっくり枠には
+          // そもそも期限が無い（rules/v3.md の表）ので、0 と書くと嘘になる。
+          [
+            "期限で降りた数",
+            (p) => {
+              if (!p) return "—";
+              if (p.expired_count === null || p.expired_count === undefined) {
+                return '—<div class="perf-cell-note">この枠には<br>期限がありません</div>';
+              }
+              return `${p.expired_count}件`;
+            },
+          ],
+          ["合計損益", (p) => (p ? yen(p.total_pnl) : "—")],
+        ];
+
+        const headRow = document.createElement("tr");
+        headRow.innerHTML = `<th></th>${order.map((name) => `<th>${escapeHtml(name)}</th>`).join("")}`;
+        table.appendChild(headRow);
+
+        for (const [label, formatter] of rows) {
+          const tr = document.createElement("tr");
+          tr.innerHTML = `<th class="perf-row-label">${label}</th>${buckets
+            .map((p) => `<td>${formatter(p)}</td>`)
+            .join("")}`;
+          table.appendChild(tr);
+        }
+        card.appendChild(table);
+
+        // 「期限で降りた数」がどうやって出した数字かを、利用者にも書く。
+        // これは「なぜ売ったか」の記録ではなく、保有日数からの導出なので、
+        // 実際より多めに出る。黙って出すと、期限のせいで降りた回数として
+        // 読まれてしまう。
+        const noteExpired = document.createElement("p");
+        noteExpired.className = "hint-text";
+        noteExpired.textContent =
+          "「期限で降りた数」は、決着した取引のうち、保有日数が期限に届いていたものを数えたものです。" +
+          "利確や損切りで降りた日がたまたま期限の日だった取引も、ここでは期限切れに数えます（実際より多めに出ます）。" +
+          "「じっくり枠」には期限がないので「—」です。";
+        card.appendChild(noteExpired);
+
+        const noteRotation = document.createElement("p");
+        noteRotation.className = "hint-text";
+        noteRotation.textContent = notEnough
+          ? `「損益トントン」は、勝っても負けてもいない勝率の目安です。各枠${DECISION_THRESHOLD}件ずつ決着したら、勝率がこれを上回っているかを見ます。`
+          : "「損益トントン」は、勝っても負けてもいない勝率の目安です。これを上回っていれば効いていると言えます。";
+        card.appendChild(noteRotation);
+
+        root.appendChild(card);
+      }
+
+      function renderMain(state) {
+        const main = document.getElementById("main-root");
+        main.innerHTML = "";
+
+        // 反映待ちの記録の帯。反映されるまで確定損益も現金も変わらない
+        // ので、これが無いと「記録したのに収支が動いていない」を
+        // 「記録できていない」と読み違える。
+        const bannerRoot = document.getElementById("banner-root");
+        bannerRoot.innerHTML = "";
+        renderUnappliedBanner(bannerRoot, state.unapplied_fills);
+
+        try {
+          renderMoney(main, state);
+        } catch (err) {
+          console.error("資産の状況の表示に失敗しました", err);
+          main.appendChild(banner("danger", "資産の状況を表示できませんでした（データの形が想定と違います）。"));
+        }
+
+        try {
+          renderBucketPerformance(main, state);
+        } catch (err) {
+          console.error("枠ごとの成績の表示に失敗しました", err);
+          main.appendChild(banner("danger", "枠ごとの成績を表示できませんでした（データの形が想定と違います）。"));
+        }
+      }
+
+      async function loadAndRender() {
+        const main = document.getElementById("main-root");
+        main.innerHTML = '<div class="loading-state">読み込んでいます…</div>';
+        try {
+          const state = await loadState();
+          renderMain(state);
+        } catch (err) {
+          // 失敗の経路でも banner-root を空にする（前回の「反映できて
+          // いない記録が◯件」を、いまの件数として読ませないため）。
+          document.getElementById("banner-root").innerHTML = "";
+          main.innerHTML = "";
+          main.appendChild(banner("danger", err.message || "いまの状態を読み込めませんでした"));
+          const retryBtn = document.createElement("button");
+          retryBtn.className = "btn btn-secondary btn-block";
+          retryBtn.textContent = "もう一度読み込む";
+          retryBtn.addEventListener("click", () => loadAndRender());
+          main.appendChild(retryBtn);
+        }
+      }
+
+      document.getElementById("nav-root").appendChild(renderNav("performance"));
+      loadAndRender();
+    </script>
+  </body>
+</html>

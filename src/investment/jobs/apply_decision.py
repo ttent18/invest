@@ -449,10 +449,13 @@ def process(
     journal_path: str,
     settings: Settings,
     capital: float,
-) -> tuple[int, int]:
+) -> tuple[int, int, int, int]:
     """decisions を検証し、結果に応じて proposals / data_gaps に記録する。
 
-    戻り値は (採用件数, 却下件数)。
+    戻り値は (採用件数, 却下件数, 採用のうち買いの件数, 採用のうち売りの件数)。
+    買い・売りの内訳を分けて返すのは、通知の見出しで「買う候補」とだけ
+    言うと、売りの提案しかない日でも実態と違う見出しになるため
+    （最終レビューの指摘）。
     """
     accepted, rejected = [], []
     # このバッチで枠ごとに何件通したかを数えながら進む。数えないと、
@@ -501,7 +504,9 @@ def process(
         record_gap(conn, scope=journal_gap[0], detail=journal_gap[1])
 
     print(f"採用 {len(accepted)} 件 / 却下 {len(rejected)} 件")
-    return len(accepted), len(rejected)
+    buy_count = sum(1 for d in accepted if d["action"] == "buy")
+    sell_count = sum(1 for d in accepted if d["action"] == "sell")
+    return len(accepted), len(rejected), buy_count, sell_count
 
 
 def check_journal_covers(
@@ -584,6 +589,22 @@ def load_decision(path: Path) -> tuple[list[dict], str, tuple[str, str] | None]:
     return raw.get("decisions", []), raw.get("journal_path", ""), None
 
 
+def _candidates_heading(buy_count: int, sell_count: int) -> str:
+    """通知の見出しを組み立てる。
+
+    accepted（採用した提案）には買いだけでなく売りの提案も含まれる。
+    それなのに見出しを「買う候補が◯件あります」の一本にしてしまうと、
+    売りの提案しかない日でも「買う」としか言わない、実態と違う見出しに
+    なる（最終レビューの指摘）。件数が0の側は言わない。
+    """
+    parts = []
+    if buy_count:
+        parts.append(f"買う候補が {buy_count} 件")
+    if sell_count:
+        parts.append(f"売る候補が {sell_count} 件")
+    return "、".join(parts) + "あります"
+
+
 def main() -> int:
     with connect() as conn:
         # 総資金が0円（以下）のときは、ここで止めて記録する。cash に JPY の
@@ -610,14 +631,16 @@ def main() -> int:
             print(missing[1])
             return 1
         print(f"総資金 {capital:,.0f}円 で検証します")
-        accepted, _rejected = process(conn, ctx, decisions, journal_path, SETTINGS, capital)
+        accepted, _rejected, buy_count, sell_count = process(
+            conn, ctx, decisions, journal_path, SETTINGS, capital
+        )
 
         # 「あなたが動く必要がある」ときだけ通知する。
         # 提案が0件の日に通知すると、通知そのものが意味を失う。
         if accepted:
             notify_send(
                 conn,
-                title=f"買う候補が {accepted} 件あります",
+                title=_candidates_heading(buy_count, sell_count),
                 body="タップして内容を確認してください",
                 url="/",
             )

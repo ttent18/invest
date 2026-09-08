@@ -237,7 +237,7 @@ def save_fill_result(
     cash_delta: float,
     trade: dict,
     currency: str,
-    recorded_at,
+    happened_at,
     proposal_id: int | None = None,
 ) -> None:
     """1件の申告の反映を、まとめて1つのトランザクションで書き込む。
@@ -248,9 +248,10 @@ def save_fill_result(
 
     position が None なら、その銘柄の保有を削除する（全部売った場合）。
 
-    recorded_at は利用者が申告した時刻（fills.recorded_at）。取引の
-    executed_at と保有の opened_at にはこれを使い、ジョブが実行された時刻
-    （NOW()）は使わない。月曜の場中に買ってもジョブは翌朝に実行されるため、
+    happened_at には、実際に売買した日時（fills.traded_at）が分かっていれば
+    それを、無ければ申告した時刻（fills.recorded_at）を呼び出し側が選んで渡す。
+    取引の executed_at と保有の opened_at にはこれを使い、ジョブが実行された
+    時刻（NOW()）は使わない。月曜の場中に買ってもジョブは翌朝に実行されるため、
     NOW() を使うと opened_at が翌朝になり、保有日数（回転枠の期限判定や
     枠ごとの成績の計算に使う）が実際よりずれてしまう。
 
@@ -270,7 +271,7 @@ def save_fill_result(
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
-                recorded_at, trade["symbol"], trade["side"], trade["quantity"],
+                happened_at, trade["symbol"], trade["side"], trade["quantity"],
                 trade["price"], trade["currency"], trade["fee"], trade["bucket"],
                 trade["realized_pnl"], trade["holding_days"],
             ),
@@ -297,7 +298,7 @@ def save_fill_result(
                 """,
                 (
                     position.symbol, position.quantity, position.avg_price, currency,
-                    position.take_profit, position.stop_loss, recorded_at,
+                    position.take_profit, position.stop_loss, happened_at,
                     position.bucket,
                 ),
             )
@@ -312,8 +313,9 @@ def save_fill_result(
         # 全体を取り消す（fills も未反映のまま残るので、あとで気づける）。
         if cur.rowcount == 0:
             raise FillError(
-                f"現金（{currency}）の残高が登録されていません。"
-                "init_cash などで先に現金の行を作ってください"
+                f"現金（{currency}）の残高の記録が見つかりません。"
+                f"{trade['symbol']} の{'買い' if trade['side'] == 'buy' else '売り'}"
+                "を反映できませんでした。設定を確認してください"
             )
         cur.execute(
             "UPDATE fills SET applied_at = NOW(), apply_error = NULL WHERE id = %s",
@@ -324,6 +326,28 @@ def save_fill_result(
                 "UPDATE proposals SET outcome = 'taken' WHERE id = %s", (proposal_id,)
             )
     conn.commit()
+
+
+def save_last_prices(conn, prices: dict[str, float]) -> int:
+    """最後に見た株価を保有に保存する。戻り値は更新した件数。
+
+    渡された銘柄だけを更新する。取れなかった銘柄の古い値は消さない。
+    古い値でも「いつ時点か」を添えれば画面に出せるが、消すと何も出せなくなる。
+    """
+    if not prices:
+        return 0
+    with conn.cursor() as cur:
+        cur.executemany(
+            """
+            UPDATE positions
+            SET last_price = %s, last_price_at = NOW()
+            WHERE symbol = %s
+            """,
+            [(price, symbol) for symbol, price in prices.items()],
+        )
+        updated = cur.rowcount
+    conn.commit()
+    return updated
 
 
 def select_bucket_performance(conn) -> list[dict]:

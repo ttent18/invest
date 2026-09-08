@@ -25,13 +25,15 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           PYTHONPATH: src
 
-      - name: 記録された約定を反映する
+      - name: 記録された売買を反映する
         # スマホから「買った/売った」と記録された内容を、保有・現金・履歴に
         # 反映する。朝の確認より先に行う。反映しないまま確認すると、
         # 買ったばかりの銘柄を見落とす。
         run: uv run python -m investment.jobs.apply_fills
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          VAPID_PRIVATE_KEY: ${{ secrets.VAPID_PRIVATE_KEY }}
+          VAPID_SUBJECT: ${{ secrets.VAPID_SUBJECT }}
           PYTHONPATH: src
 
       - run: uv run python -m investment.jobs.morning_check

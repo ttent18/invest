@@ -19,6 +19,9 @@ __pycache__/
 venv/
 .pytest_cache/
 
+# JavaScript（Cloudflare Pages Functions）
+node_modules/
+
 # macOS / Windows
 .DS_Store
 Thumbs.db

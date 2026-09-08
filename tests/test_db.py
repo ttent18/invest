@@ -12,6 +12,7 @@ from investment.db import (
     mark_fill_failed,
     record_gap,
     record_gaps,
+    save_last_prices,
     select_bucket_performance,
     select_capital,
     select_push_subscriptions,
@@ -482,3 +483,76 @@ def test_bucket_performance_lists_every_bucket_even_with_no_trades(conn):
     assert all(r["closed"] == 0 for r in rows)
     assert all(r["win_rate"] is None for r in rows)          # 0件なら勝率は「無い」
     assert all(r["avg_holding_days"] is None for r in rows)
+
+
+def test_save_last_prices_updates_only_the_symbols_given(conn):
+    """取れた銘柄だけ更新し、取れなかった銘柄の古い値を消さないこと。
+
+    古い値が残っていれば「いつ時点の値か」を添えて表示できる。
+    消してしまうと、画面に何も出せなくなる。
+    """
+    with conn.cursor() as cur:
+        for sym in ("1111.T", "2222.T"):
+            cur.execute(
+                """
+                INSERT INTO positions
+                    (symbol, quantity, avg_price, currency, take_profit, stop_loss,
+                     opened_at, bucket, last_price, last_price_at)
+                VALUES (%s, 100, 900, 'JPY', 1098, 828, NOW(), 'じっくり', 850, NOW())
+                """,
+                (sym,),
+            )
+    conn.commit()
+
+    assert save_last_prices(conn, {"1111.T": 910.0}) == 1
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT symbol, last_price FROM positions ORDER BY symbol")
+        rows = {r["symbol"]: float(r["last_price"]) for r in cur.fetchall()}
+    assert rows["1111.T"] == 910.0     # 更新された
+    assert rows["2222.T"] == 850.0     # 古い値が残っている
+
+
+def test_save_last_prices_with_nothing_to_save_writes_nothing(conn):
+    assert save_last_prices(conn, {}) == 0
+
+
+# --- 二重送信よけ（client_key） -------------------------------------------
+# 画面のボタンを2回押すと fills に2行入ってしまう。計画2-A で入れた
+# 「同じ提案に2回申告が来たら弾く」守りは、2行目を別の申告として扱うので
+# すり抜ける。行そのものを作らせない。
+
+
+def test_the_same_client_key_cannot_be_recorded_twice(conn):
+    """画面のボタンを2回押しても、記録が2行にならないこと。
+
+    計画2-A の「同じ提案に2回申告が来たら弾く」守りは、2行目を別の申告として
+    扱うのですり抜ける。行そのものを作らせない。
+    """
+    sql = """
+        INSERT INTO fills (symbol, side, quantity, price, currency, client_key)
+        VALUES ('1111.T', 'buy', 100, 900, 'JPY', 'abc-123')
+    """
+    with conn.cursor() as cur:
+        cur.execute(sql)
+    conn.commit()
+
+    with conn.cursor() as cur, pytest.raises(psycopg.errors.UniqueViolation):
+        cur.execute(sql)
+
+
+def test_client_key_may_be_absent(conn):
+    """鍵の無い記録も入れられること（手作業で入れる場合）。
+
+    UNIQUE 制約は NULL を重複とみなさないので、複数行入る。
+    """
+    sql = """
+        INSERT INTO fills (symbol, side, quantity, price, currency)
+        VALUES ('1111.T', 'buy', 100, 900, 'JPY')
+    """
+    with conn.cursor() as cur:
+        cur.execute(sql)
+        cur.execute(sql)
+        cur.execute("SELECT COUNT(*) AS c FROM fills")
+        assert cur.fetchone()["c"] == 2
+    conn.commit()
