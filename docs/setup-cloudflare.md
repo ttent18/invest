@@ -683,6 +683,40 @@ Cloudflare の環境変数は、API（`functions/` の中）からだけ読め�
 | `DATABASE_URL` | `analyze.yml` / `morning.yml` / `screen.yml`（`test.yml` は使いません） |
 | `CLAUDE_CODE_OAUTH_TOKEN` | `analyze.yml`（AIが判断する部分） |
 
+### 8-5. `CLAUDE_CODE_OAUTH_TOKEN` にも期限があります（カレンダーに入れる）
+
+**このトークンの有効期間は1年です**（`claude setup-token` で作ったもの）。
+GitHub Secrets は登録後に中身を見られないので、**GitHub の画面では期限が分かりません。
+作った日から1年**と考えてください。
+
+**切れたときの症状:** `analyze` が **AIが判断する** 段で失敗します。
+GitHub の **Actions** タブに赤い×が出るので、`GITHUB_TOKEN` の期限切れよりは
+気づけます。ただし**その日から提案が1件も作られなくなります。**
+
+**直しかた:** パソコンのターミナルで
+
+```bash
+claude setup-token
+```
+
+を実行し、出てきた文字列で `CLAUDE_CODE_OAUTH_TOKEN` の値を差し替えます。
+
+**いまやること:** カレンダーに
+**「Claude のトークンの期限」**という予定を、
+**作った日から1年の1週間前**に作ってください。
+
+> **2つのトークンの違い**
+>
+> | | `GITHUB_TOKEN` | `CLAUDE_CODE_OAUTH_TOKEN` |
+> |---|---|---|
+> | どこに入れる | **Cloudflare**（7章） | **GitHub Secrets**（この章） |
+> | 何のため | 「いま分析して」ボタンから分析を起動する | **AIが銘柄を判断する部分そのもの** |
+> | 期限 | 90日（3-1 で自分で選ぶ） | **1年** |
+> | 切れたときの症状 | 「いま分析して」だけが静かに効かない。**気づきにくい** | `analyze` が失敗し、Actions に赤い×が出る |
+>
+> **切れたときに困るのは Claude のほうですが、気づけないのは GitHub のほうです。**
+> どちらもカレンダーに入れてください。
+
 ---
 
 ## 9. iPhone に入れる
