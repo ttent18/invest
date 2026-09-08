@@ -250,7 +250,7 @@ iPhone は「アプリの中の小さなブラウザ」でログイン画面を�
 | Project name | `invest`（下の【名前が取れなかったとき】を先に読んでください） |
 | Production branch | **`main`** |
 | Framework preset | **None**（一覧の一番上。何も選ばない） |
-| Build command | **`exit 0`**（理由は 4-5。空のままでも動きます） |
+| Build command | **`npm ci --omit=dev`**（**空のままにしないでください。**理由は 4-5） |
 | Build output directory | **`web`** |
 | Root directory (advanced) → Path | **空のまま**（何も入力しない） |
 
@@ -273,8 +273,10 @@ iPhone は「アプリの中の小さなブラウザ」でログイン画面を�
   他のブランチは「お試し用のURL」になります（**5章**で、そちらにも鍵をかけます）
 - **Framework preset が None** …… React などの枠組みを使っていないから。
   何か選ぶと、存在しないビルドコマンドが勝手に入って失敗します
-- **Build command が `exit 0`** …… 変換するものが無いから。
-  素の HTML と JavaScript を、そのまま配るだけです（4-5 で詳しく）
+- **Build command が `npm ci --omit=dev`** …… API が使う部品
+  （Neon に接続するためのもの）を入れるため。
+  **ここを空のままにすると、Cloudflare は「ビルドは要らない」と判断して、
+  部品を入れる作業ごと丸ごと飛ばします。その結果、API が全滅します**（4-5 で詳しく）
 - **Build output directory が `web`** …… **`web/` の中身だけ**を配るため。
   **ここを空にしたり `/` にしたりすると、リポジトリ全体
   （`src/` の中身も `journal/` の中身も）がインターネットに公開されます。**
@@ -317,40 +319,59 @@ invest/
 **確認方法:** 設定が全部終わったあと、**10-2**（「数字が出る」）を見れば分かります。
 数字が出れば `functions/` は正しく API として動いています。
 
-### 4-5. ビルドコマンドと、`npm install` について
+### 4-5. ビルドコマンドと、部品を入れる作業について
 
-**ビルドコマンドは `exit 0` でも、空のままでも、どちらでも動きます。**
-`exit 0` は「何もせず、成功しました」とだけ答える合図です。
+**ビルドコマンドを空のままにしてはいけません。** ここが、この手順で一番つまずくところです。
 
-この手順書が `exit 0` を勧めるのは、**Framework preset を None にする場合、
-Cloudflare の公式ドキュメントがそう書いているから**です。
+**なぜ:** `functions/_shared/db.js` は、Neon（データベース）に接続するための部品
+（`@neondatabase/serverless`）を読み込んでいます。この部品は
+リポジトリには入っておらず、**デプロイのたびに入れ直す**必要があります
+（`package.json` に「これが要る」と書いてあります）。
 
-> If you are not using a preset, use `exit 0`.
-> （プリセットを使わない場合は `exit 0` を使ってください）
+Cloudflare は、**ビルドコマンドが空だと「ビルドは要らない」と判断して、
+部品を入れる作業ごと丸ごと飛ばします。** ログにこう出ます。
+
+```
+No build command specified. Skipping build step.
+Found Functions directory at /functions. Uploading.
+✘ [ERROR] Could not resolve "@neondatabase/serverless"
+```
+
+**こうなると API は1つも動きません。** 画面は出るのに数字が出ない、
+記録もできない、という状態になります。
+
+**だから `npm ci --omit=dev` を入れます。**
+
+- `npm ci` …… `package.json` と `package-lock.json` に書いてあるとおりに部品を入れる
+- `--omit=dev` …… テスト用の部品（`vitest`）は入れない。
+  Cloudflare 側では使わないので、その分速く終わります
+
+**成功したときのログの見分け方:**
+`Installing dependencies` のような行が出て、そのあと
+`Found Functions directory at /functions. Uploading.` が
+**エラーなしで**通れば成功です。
+
+**やってはいけないこと:**
+
+- **ビルドコマンドを空にする** …… 上のとおり、API が全滅します
+- **`SKIP_DEPENDENCY_INSTALL` という環境変数を設定する** ……
+  同じ理由で API が全滅します
+- **`npm run build` を入れる** …… このリポジトリにはそんな作業はありません
+  （素の HTML と JavaScript を、変換せずそのまま配ります）
+
+> **補足:** Cloudflare の公式ドキュメントには
+> 「If you are not using a preset, use `exit 0`.」
+> （プリセットを使わない場合は `exit 0` を使ってください）とも書かれており、
+> `exit 0` でも部品は入ります。ただし**実際に試して失敗した**ので、
+> この手順書は「部品を入れる」と明示的に書いてある
+> `npm ci --omit=dev` を使います。何が起きるかが読んで分かるほうが安全です。
 >
 > — https://developers.cloudflare.com/pages/configuration/build-configuration/
 
-空のままでも失敗しない環境が多いのですが、**どちらでも結果は同じ**
-（変換は何も起きない）なので、公式に書いてあるほうを最初から入れておきます。
-
-**ビルドコマンドが何であっても、`npm install` は走ります。**
-`package.json` があるので、Cloudflare は依存パッケージを自動で入れます。
-
-> Cloudflare Pages installs your project dependencies, builds the project,
-> and deploys it to Cloudflare's global network.
->
-> — https://developers.cloudflare.com/pages/get-started/git-integration/
-
-**これは止めないでください。必要な動作です。**
-`functions/_shared/db.js` が `@neondatabase/serverless`
-（Neon に接続するための部品）を読み込んでいるので、
-これが入っていないと API が動きません。
-
-- **`npm run build` は走りません。** 走るのは、Build command 欄に書いたものだけです。
-  `exit 0` は何もしないので、変換は起きません
-- `SKIP_DEPENDENCY_INSTALL` という環境変数は**設定しないでください**。
-  設定すると `@neondatabase/serverless` が入らず、API が全滅します
-- `vitest`（テスト用の部品）も一緒に入りますが、動かないだけで害はありません
+**あとから直すには:** プロジェクト → **Settings** → **Builds & deployments** →
+**Build configurations** の **Edit** で変えられます。変えたあと、
+**Deployments** タブで失敗したデプロイの **Retry deployment** を押します。
+**git に何かを push し直す必要はありません。**
 
 ### 4-6. デプロイの結果を見る
 
@@ -1165,6 +1186,7 @@ analyze は曜日に関係なく動き、分析の前に必ず記録を反映し
 | 症状 | 疑うところ | 直しかた |
 |---|---|---|
 | 画面は開くが、赤い「いまの状態を読み込めませんでした」 | `DATABASE_URL` の名前か値。または環境変数を入れたあとデプロイし直していない | 7-2 と 7-4 |
+| **デプロイが失敗する。ログに `Could not resolve "@neondatabase/serverless"` と `No build command specified. Skipping build step.`** | **Build command が空になっている。** Cloudflare が「ビルドは要らない」と判断して、API が使う部品を入れる作業ごと飛ばしています | Settings → Builds & deployments → Build configurations の Edit で **`npm ci --omit=dev`** を入れ、Deployments で **Retry deployment**。git への push は不要。4-5 |
 | 画面すら開かない（404 / Not Found） | Build output directory が `web` になっていない | 4-3 |
 | **リポジトリの中身（`src/` や `journal/`）まで見えてしまう** | Build output directory が空か `/` になっている | **すぐに `web` に直してデプロイし直す**。4-3 |
 | プロジェクトが作れない（"That domain is already associated with an existing project."） | `invest` という名前が、他の誰かに先に使われている | 4-3 の【名前が取れなかったとき】。`invest-ttent18` のように後ろに文字を足す |
@@ -1236,7 +1258,7 @@ analyze は曜日に関係なく動き、分析の前に必ず記録を反映し
 | 内容 | URL |
 |---|---|
 | `functions/` はプロジェクトの一番上に置く | https://developers.cloudflare.com/pages/functions/get-started/ |
-| ビルドコマンド・出力ディレクトリ・ルートディレクトリの意味、プリセットを使わないときは `exit 0` | https://developers.cloudflare.com/pages/configuration/build-configuration/ |
+| ビルドコマンド・出力ディレクトリ・ルートディレクトリの意味（プリセットを使わないときの `exit 0` の記述もここ。ただし実際に試したところ、空だと部品が入らず失敗した。4-5 を参照） | https://developers.cloudflare.com/pages/configuration/build-configuration/ |
 | GitHub と繋いでデプロイする手順、依存パッケージの自動インストール | https://developers.cloudflare.com/pages/get-started/git-integration/ |
 | GitHub 連携で許可される範囲、取り消しかた | https://developers.cloudflare.com/pages/configuration/git-integration/github-integration/ |
 | **Enable access policy はお試し用のURLしか守らない** | https://developers.cloudflare.com/pages/configuration/preview-deployments/ |
