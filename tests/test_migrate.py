@@ -84,6 +84,9 @@ def test_fills_are_applied_before_anything_reads_the_positions(workflow: str):
         # apply_decision / morning_check と同じ形でここにも入れておく。
         ("analyze.yml", "investment.jobs.apply_fills"),
         ("morning.yml", "investment.jobs.apply_fills"),
+        # 通知の経路だけを試すためのワークフロー。ここに鍵が渡っていないと、
+        # 「通知が来ない原因を切り分けるための道具」自体が動かない。
+        ("notify-test.yml", "investment.jobs.notify_test"),
     ],
 )
 def test_the_notification_keys_reach_the_step_that_sends_them(

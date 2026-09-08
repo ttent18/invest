@@ -1,0 +1,36 @@
+name: notify-test
+
+# 通知が iPhone まで届くかを確かめるためだけのワークフロー。
+#
+# **手で押したときにだけ動く。** 決まった時刻には動かない。
+# 分析（20〜40分）の最後まで待たずに、通知の経路だけを20秒で試せる。
+#
+# 使い方: GitHub → Actions → notify-test → Run workflow
+
+on:
+  workflow_dispatch:
+
+jobs:
+  notify-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: データベースの構造を最新にする
+        # 通知の宛先の表（push_subscriptions）が無い状態でも動くように、
+        # 読む前に必ず適用する。
+        run: uv run python -m investment.jobs.migrate
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          PYTHONPATH: src
+
+      - name: 練習の通知を送る
+        run: uv run python -m investment.jobs.notify_test
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          VAPID_PRIVATE_KEY: ${{ secrets.VAPID_PRIVATE_KEY }}
+          VAPID_SUBJECT: ${{ secrets.VAPID_SUBJECT }}
+          PYTHONPATH: src
