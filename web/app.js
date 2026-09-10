@@ -27,6 +27,13 @@
 //
 // サーバーのエラー本文（例外のスタックトレースなど）はここでは一切
 // 画面に渡さない。/api/state が返す { message: "..." } の message だけを使う。
+// 合言葉を入れ直す画面へ移る。いま見ている画面を覚えさせて、
+// 入れ直したあと同じ場所に戻れるようにする。
+export function goToLogin() {
+  const next = window.location.pathname + window.location.search;
+  window.location.assign(`/api/login?next=${encodeURIComponent(next)}`);
+}
+
 export async function loadState() {
   let res;
   try {
@@ -51,6 +58,14 @@ export async function loadState() {
   const NEXT_STEP =
     "時間をおいて「もう一度読み込む」を押してください。" +
     "それでも直らないときは、いまの保有と予約注文をSBIのアプリで確かめてください";
+
+  // 合言葉の記憶が切れた。**利用者が自力で入り直せる場所へ送る。**
+  // ここで「読み込めませんでした」とだけ出すと、入れ直す場所が
+  // どこにも無く、利用者は詰む（2026-09-10 に実際に起きた）。
+  if (res.status === 401 && body && body.reason === "login_required") {
+    goToLogin();
+    throw new Error("合言葉の記憶が切れました。合言葉の画面に移ります");
+  }
 
   if (!res.ok) {
     const detail = body && typeof body.message === "string" ? body.message : "いまの状態を読み込めませんでした";
@@ -91,6 +106,21 @@ async function postJson(url, body) {
     data = await res.json();
   } catch {
     // 本文が無い／JSONでない。下のメッセージに任せる。
+  }
+
+  // 合言葉の記憶が切れた。
+  //
+  // **ここでは勝手に画面を移らない。** 送信の途中なので、移ると
+  // 利用者が入力した株数・値段・日時が消える。入れ直す場所だけ案内し、
+  // 入力はそのまま残す（入れ直したあと、もう一度押せば送れる）。
+  if (res.status === 401 && data && data.reason === "login_required") {
+    return {
+      ok: false,
+      kind: "login_required",
+      message:
+        "合言葉の記憶が切れました。この画面を開き直して合言葉を入れると、" +
+        "入力はそのままもう一度送れます",
+    };
   }
 
   if (!res.ok) {
